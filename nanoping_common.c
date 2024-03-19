@@ -299,7 +299,7 @@ static ssize_t receive_pkt_common(struct nanoping_instance *ins,
     if ((siz = recvmsg(ins->fd, &m, 0)) < 0) {
         if (errno == EAGAIN) {
             fprintf(stderr, "recvmsg: Request timed out.\n");
-            return siz;
+            return -EAGAIN;
         }
         perror("recvmsg");
         return siz;
@@ -943,6 +943,74 @@ int nanoping_txs_one(struct nanoping_instance *ins)
     }
 
     return 0;
+}
+
+void nanoping_reset_state(struct nanoping_instance *ins)
+{
+    struct nanoping_rx_record *rx_rec;
+    struct nanoping_txs_record *tx_rec;
+
+    ins->pkt_received = 0;
+    ins->pkt_transmitted = 0;
+    ins->rxs_collected = 0;
+    ins->txs_collected = 0;
+    ins->rem_rxs_collected = 0;
+    ins->rem_txs_collected = 0;
+    ins->rx_prev_rxs_found = 0;
+    ins->rx_prev_txs_found = 0;
+    ins->tx_prev_rxs_found = 0;
+    ins->tx_prev_txs_found = 0;
+    ins->tx_prev_txs_too_late = 0;
+
+    pthread_mutex_lock(&ins->rx_lock);
+    while (!TAILQ_EMPTY(&ins->rx_head)) {
+        rx_rec = TAILQ_FIRST(&ins->rx_head);
+        TAILQ_REMOVE(&ins->rx_head, rx_rec, entries);
+        free(rx_rec);
+    }
+    pthread_mutex_unlock(&ins->rx_lock);
+
+    pthread_mutex_lock(&ins->rx4proc_lock);
+    while (!TAILQ_EMPTY(&ins->rx4proc_head)) {
+        rx_rec = TAILQ_FIRST(&ins->rx4proc_head);
+        TAILQ_REMOVE(&ins->rx4proc_head, rx_rec, entries);
+        free(rx_rec);
+    }
+    pthread_mutex_unlock(&ins->rx4proc_lock);
+
+
+    pthread_mutex_lock(&ins->rx4tx_lock);
+    while (!TAILQ_EMPTY(&ins->rx4tx_head)) {
+        rx_rec = TAILQ_FIRST(&ins->rx4tx_head);
+        TAILQ_REMOVE(&ins->rx4tx_head, rx_rec, entries);
+        free(rx_rec);
+    }
+    pthread_mutex_unlock(&ins->rx4tx_lock);
+
+
+    pthread_mutex_lock(&ins->txs_lock);
+    while (!TAILQ_EMPTY(&ins->txs_head)) {
+        tx_rec = TAILQ_FIRST(&ins->txs_head);
+        TAILQ_REMOVE(&ins->txs_head, tx_rec, entries);
+        free(tx_rec);
+    }
+    pthread_mutex_unlock(&ins->txs_lock);
+
+    pthread_mutex_lock(&ins->txs4proc_lock);
+    while (!TAILQ_EMPTY(&ins->txs4proc_head)) {
+        tx_rec = TAILQ_FIRST(&ins->txs4proc_head);
+        TAILQ_REMOVE(&ins->txs4proc_head, tx_rec, entries);
+        free(tx_rec);
+    }
+    pthread_mutex_unlock(&ins->txs4proc_lock);
+
+    pthread_mutex_lock(&ins->rem_txs_lock);
+    while (!TAILQ_EMPTY(&ins->rem_txs_head)) {
+        tx_rec = TAILQ_FIRST(&ins->rem_txs_head);
+        TAILQ_REMOVE(&ins->rem_txs_head, tx_rec, entries);
+        free(tx_rec);
+    }
+    pthread_mutex_unlock(&ins->rem_txs_lock);
 }
 
 void nanoping_finish(struct nanoping_instance *ins)

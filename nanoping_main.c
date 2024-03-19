@@ -12,6 +12,7 @@
 #include <limits.h>
 #include <assert.h>
 #include <stdatomic.h>
+#include <errno.h>
 #include "nanoping.h"
 
 enum nanoping_mode {
@@ -32,6 +33,7 @@ static struct option longopts[] = {
     {"timeout", required_argument,  NULL,   't'},
     {"busypoll", required_argument, NULL,   'b'},
     {"dummy-pkt", required_argument, NULL, 'x'},
+    {"persistent", no_argument,     NULL,   'R'},
     {"help",    no_argument,        NULL,   'h'},
     {0,         0,                  0,  0}
 };
@@ -515,7 +517,7 @@ static int run_client(struct nanoping_instance *ins, int count, int delay, char 
     return EXIT_SUCCESS;
 }
 
-static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt)
+static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt, bool persistent)
 {
     pthread_t txs_thread = 0;
     bool txs_started = false;
@@ -538,8 +540,13 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt)
             txs_started = true;
         }
         siz = nanoping_receive_one(ins, &receive_result);
-        if (siz < 0)
+        if (siz == -EAGAIN && persistent && atomic_load(&state) == msg_none) {
+            nanoping_reset_state(ins);
+            nanoping_wait_for_receive(ins);
+            continue;
+        } else if (siz < 0) {
             return EXIT_FAILURE;
+        }
 
         switch (receive_result.type) {
             case msg_syn:
@@ -591,7 +598,13 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt)
                 }
                 timevalsub(&finished, &started, &duration);
                 dump_statistics(ins, &duration, false, pktsize);
-                return EXIT_SUCCESS;
+                if (persistent) {
+                    nanoping_reset_state(ins);
+                    nanoping_wait_for_receive(ins);
+                } else {
+                    return EXIT_SUCCESS;
+                }
+                break;
             case msg_ping:
                 if (atomic_load(&state) != msg_pong) {
                     fprintf(stderr, "received message (msg_ping) is inconsistent with current state, ignoreing\n");
@@ -639,6 +652,7 @@ int main(int argc, char **argv)
     bool emulation = false;
     bool ptpmode = false;
     bool silent = false;
+    bool persistent = false;
     int timeout = 5000000;
     int busy_poll = 0;
     int dummy_pkt = 0;
@@ -659,7 +673,7 @@ int main(int argc, char **argv)
 	usage();
 	return EXIT_FAILURE;
     }
-    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:ePst:b:h", longopts, NULL)) != -1) {
+    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:ePst:b:Rh", longopts, NULL)) != -1) {
         switch (c) {
             case 'i':
                 interface = optarg;
@@ -694,6 +708,9 @@ int main(int argc, char **argv)
             case 'x':
                 dummy_pkt = atoi(optarg);
                 break;
+            case 'R':
+                persistent = true;
+                break;
             case 'h':
             default:
                 usage();
@@ -724,7 +741,7 @@ int main(int argc, char **argv)
     if (mode == mode_client) {
         res = run_client(ins, count, delay, host, port, log, silent, dummy_pkt);
     } else {
-        res = run_server(ins, port, dummy_pkt);
+        res = run_server(ins, port, dummy_pkt, persistent);
     }
     nanoping_finish(ins);
     return res;
