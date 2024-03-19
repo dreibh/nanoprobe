@@ -168,6 +168,8 @@ static void *process_client_receive_task(void *arg)
                 atomic_store(&state, msg_syn_ack);
                 break;
             case msg_syn_rst:
+                if (atomic_load(&state) != msg_syn)
+                    break;
                 atomic_store(&state, msg_syn_rst);
                 fprintf(stderr, "Remote node rejected connection\n");
                 break;
