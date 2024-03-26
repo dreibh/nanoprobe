@@ -6,6 +6,8 @@
 #include <sys/queue.h>
 #include <netinet/in.h>
 
+#define MAX_PAD_BYTES 2048
+
 struct nanoping_timeval {
     int64_t tv_sec;
     int64_t tv_nsec;
@@ -67,6 +69,7 @@ struct nanoping_instance {
     bool emulation;
     bool ptpmode;
     int emul_fds[2];
+    int pad_bytes;
     unsigned long pkt_received;
     unsigned long pkt_transmitted;
     unsigned long rxs_collected;
@@ -127,7 +130,9 @@ struct nanoping_process_result {
 };
 
 
-struct nanoping_instance *nanoping_init(char *interface, char *port, bool server, bool emulation, bool ptpmode, int timeout, int busy_poll);
+struct nanoping_instance *nanoping_init(char *interface, char *port,
+    bool server, bool emulation, bool ptpmode, int timeout, int pad_bytes,
+    int busy_poll);
 int nanoping_process_one(struct nanoping_instance *ins,
     struct nanoping_process_result *result);
 int nanoping_wait_for_receive(struct nanoping_instance *ins);

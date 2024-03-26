@@ -33,6 +33,7 @@ static struct option longopts[] = {
     {"timeout", required_argument,  NULL,   't'},
     {"busypoll", required_argument, NULL,   'b'},
     {"dummy-pkt", required_argument, NULL, 'x'},
+    {"pad-bytes", required_argument, NULL,  'B'},
     {"persistent", no_argument,     NULL,   'R'},
     {"help",    no_argument,        NULL,   'h'},
     {0,         0,                  0,  0}
@@ -656,6 +657,7 @@ int main(int argc, char **argv)
     int timeout = 5000000;
     int busy_poll = 0;
     int dummy_pkt = 0;
+    int pad_bytes = 0;
     int c, res, nargc = argc;
 
     if (argc >= 2) {
@@ -673,7 +675,7 @@ int main(int argc, char **argv)
 	usage();
 	return EXIT_FAILURE;
     }
-    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:ePst:b:Rh", longopts, NULL)) != -1) {
+    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:ePst:B:b:Rh", longopts, NULL)) != -1) {
         switch (c) {
             case 'i':
                 interface = optarg;
@@ -702,6 +704,9 @@ int main(int argc, char **argv)
             case 't':
                 timeout = atoi(optarg);
                 break;
+            case 'B':
+                pad_bytes = atoi(optarg);
+                break;
             case 'b':
                 busy_poll = atoi(optarg);
                 break;
@@ -716,6 +721,12 @@ int main(int argc, char **argv)
                 usage();
                 return EXIT_FAILURE;
         }
+    }
+
+    if (pad_bytes < 0 || pad_bytes > MAX_PAD_BYTES) {
+        fprintf(stderr, "pad-bytes must be in range [%d, %d]\n",
+                0, MAX_PAD_BYTES);
+        return EXIT_FAILURE;
     }
 
     if (ptpmode)
@@ -734,7 +745,9 @@ int main(int argc, char **argv)
      }
 
     pthread_mutex_init(&stats.lock, NULL);
-    if ((ins = nanoping_init(interface, port, mode == mode_server ? true: false, emulation, ptpmode, timeout, busy_poll)) == NULL) {
+    if ((ins = nanoping_init(interface, port, mode == mode_server ? true: false,
+                             emulation, ptpmode, timeout, pad_bytes, busy_poll))
+        == NULL) {
         return EXIT_FAILURE;
     }
 

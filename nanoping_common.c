@@ -181,21 +181,39 @@ static inline ssize_t send_pkt_common(struct nanoping_instance *ins,
     return siz;
 }
 
+static inline void init_nanoping_msg(struct nanoping_msg *msg, uint64_t seq,
+        enum nanoping_msg_type type, struct timespec *prev_rxs,
+        struct nanoping_msg_txs_record *txs_rec, int txs_rec_len)
+{
+    memset(msg, 0, sizeof(*msg));
+
+    msg->seq = seq;
+    msg->type = type;
+    msg->rxs.tv_sec = prev_rxs->tv_sec;
+    msg->rxs.tv_nsec = prev_rxs->tv_nsec;
+    msg->txs_rec_len = TXS_REC_LEN;
+
+    if (!txs_rec || txs_rec_len < 1)
+        return;
+
+    for (int i = 0; i < txs_rec_len; i++) {
+        msg->txs_rec[i] = txs_rec[i];
+    }
+}
+
 static inline ssize_t send_pkt_ptp(struct nanoping_instance *ins,
         struct sockaddr_in *remaddr, uint64_t seq, struct timespec *prev_rxs,
         struct nanoping_msg_txs_record *txs_rec, int txs_rec_len,
         enum nanoping_msg_type type)
 {
-    struct ptp_header ptp = {0, 2, htons(sizeof(ptp)),
-        {seq,
-        type,
-        {prev_rxs->tv_sec, prev_rxs->tv_nsec},
-        TXS_REC_LEN,
-        {{0}}}};
-    struct iovec iov = {&ptp, sizeof(ptp)};
+    char buf[MAX_PAD_BYTES + sizeof(struct ptp_header)] = {0};
+    struct ptp_header *ptp = (struct ptp_header *)&buf;
+    struct iovec iov = {ptp, sizeof(*ptp) + ins->pad_bytes};
 
-    for (int i = 0; i < txs_rec_len; i++)
-        ptp.msg.txs_rec[i] = txs_rec[i];
+    ptp->message_type = 0;
+    ptp->version_ptp = 2;
+    ptp->message_length = htons(sizeof(*ptp) + ins->pad_bytes);
+    init_nanoping_msg(&ptp->msg, seq, type, prev_rxs, txs_rec, txs_rec_len);
 
     return send_pkt_common(ins, remaddr, &iov, seq);
 }
@@ -205,15 +223,11 @@ static inline ssize_t send_pkt_msg(struct nanoping_instance *ins, struct sockadd
         struct nanoping_msg_txs_record *txs_rec, int txs_rec_len,
         enum nanoping_msg_type type)
 {
-    struct nanoping_msg msg = {seq,
-        type,
-        {prev_rxs->tv_sec, prev_rxs->tv_nsec},
-        TXS_REC_LEN,
-        {{0}}};
-    struct iovec iov = {&msg, sizeof(msg)};
+    char buf[MAX_PAD_BYTES + sizeof(struct nanoping_msg)] = {0};
+    struct nanoping_msg *msg = (struct nanoping_msg *)&buf;
+    struct iovec iov = {msg, sizeof(*msg) + ins->pad_bytes};
 
-    for (int i = 0; i < txs_rec_len; i++)
-        msg.txs_rec[i] = txs_rec[i];
+    init_nanoping_msg(msg, seq, type, prev_rxs, txs_rec, txs_rec_len);
 
     return send_pkt_common(ins, remaddr, &iov, seq);
 }
@@ -371,7 +385,9 @@ static ssize_t receive_pkt_ptp(struct nanoping_instance *ins,
     return siz;
 }
 
-struct nanoping_instance *nanoping_init(char *interface, char *port, bool server, bool emulation, bool ptpmode, int timeout, int busy_poll)
+struct nanoping_instance *nanoping_init(char *interface, char *port,
+        bool server, bool emulation, bool ptpmode, int timeout, int pad_bytes,
+        int busy_poll)
 {
     struct nanoping_instance *ins =
         (struct nanoping_instance *)calloc(1, sizeof(*ins));
@@ -455,6 +471,7 @@ struct nanoping_instance *nanoping_init(char *interface, char *port, bool server
             return NULL;
     }
     ins->ptpmode = ptpmode;
+    ins->pad_bytes = pad_bytes;
 
     if (busy_poll) {
         if ((res = setsockopt(ins->fd, SOL_SOCKET, SO_BUSY_POLL, &busy_poll,
@@ -928,11 +945,11 @@ int nanoping_txs_one(struct nanoping_instance *ins)
         perror("recvmsg(errqueue)");
         return siz;
     }
-    if (siz < sizeof(*msg)) {
+    if (siz < sizeof(*msg) + ins->pad_bytes) {
         fprintf(stderr, "Invalid packet size on txs callback\n");
         return -1;
     }
-    headsiz = siz - sizeof(*msg);
+    headsiz = siz - (sizeof(*msg) + ins->pad_bytes);
     msg = (struct nanoping_msg *)(((char *)pktbuf) + headsiz);
 
     if ((res = parse_control_msg(&m, &stamp, &stamp_found)) < 0)
