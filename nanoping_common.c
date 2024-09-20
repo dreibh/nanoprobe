@@ -348,6 +348,8 @@ static ssize_t receive_pkt_msg(struct nanoping_instance *ins,
     struct iovec iov = {msg, sizeof(*msg)};
 
     ssize_t siz = receive_pkt_common(ins, &iov, stamp, remaddr, err);
+    if (siz < (ssize_t)sizeof(*msg))
+	    return siz < 0 ? siz : -ENOMSG;
 
     if (msg->seq > 1) {
         if (msg->rxs.tv_sec == 0 && msg->rxs.tv_nsec == 0)
@@ -370,6 +372,8 @@ static ssize_t receive_pkt_ptp(struct nanoping_instance *ins,
     struct iovec iov = {ptp, sizeof(*ptp)};
 
     ssize_t siz = receive_pkt_common(ins, &iov, stamp, remaddr, err);
+    if (siz < (ssize_t)sizeof(*ptp))
+	    return siz < 0 ? siz : -ENOMSG;
 
     if (ptp->msg.seq > 1) {
         if (ptp->msg.rxs.tv_sec == 0 && ptp->msg.rxs.tv_nsec == 0)
