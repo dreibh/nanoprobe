@@ -296,7 +296,7 @@ static int run_client(struct nanoping_instance *ins, int count, int delay, char 
             return EXIT_FAILURE;
         if (!pktsize)
             pktsize = siz;
-        if (delay >= 0)
+        if (delay > 0)
             usleep(delay);
         if (dummy_pkt) {
             struct nanoping_send_dummies_request dummies_request;
