@@ -387,7 +387,7 @@ struct nanoping_instance *nanoping_init(char *interface, char *port,
             return NULL;
         }
 
-        logprintf(ins->log_stream, "seq,timestamp-idx,timestamp\n");
+        fprintf(ins->log_stream, "seq,timestamp-idx,timestamp\n");
     } else {
         ins->log_stream = NULL;
     }
@@ -415,11 +415,11 @@ static void log_pkt_tstamp(const struct nanoping_instance *ins, uint64_t seq,
                    const struct timespec *tstamp,
                    enum timestamp_index tstamp_idx)
 {
-    if (!ins || seq == 0)
+    if (!ins || !ins->log_stream || seq == 0)
         return;
 
-    logprintf(ins->log_stream, "%lu,t%d,%lu.%09lu\n", seq, tstamp_idx,
-              tstamp->tv_sec, tstamp->tv_nsec);
+    fprintf(ins->log_stream, "%lu,t%d,%lu.%09lu\n", seq, tstamp_idx,
+	    tstamp->tv_sec, tstamp->tv_nsec);
 }
 
 ssize_t nanoping_receive_one(struct nanoping_instance *ins,

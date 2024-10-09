@@ -15,8 +15,6 @@ enum timestamp_index {
     TSTAMP_IDX_RECVPONG = 3,
 };
 
-#define logprintf(log, ...) if (log) { fprintf(log, __VA_ARGS__); fflush(log); }
-
 #define timevaladd(tvp, uvp, vvp) \
     do { \
         (vvp)->tv_sec = (tvp)->tv_sec + (uvp)->tv_sec; \
