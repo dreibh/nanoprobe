@@ -72,6 +72,20 @@ inline static double percent_ulong(unsigned long v1, unsigned long v2)
         printf("%ld", (tvp)->tv_nsec); \
     } while (0)
 
+static uint64_t timespec_to_ns(const struct timespec *ts)
+{
+    return (uint64_t)ts->tv_sec * NS_PER_S + ts->tv_nsec;
+}
+
+static uint64_t clock_gettime_ns(clockid_t clockid)
+{
+    struct timespec ts;
+    if (clock_gettime(clockid, &ts) < 0)
+        return 0;
+
+    return timespec_to_ns(&ts);
+}
+
 static void dump_statistics(struct nanoping_instance *ins, struct timespec *duration, bool client, size_t size)
 {
     assert(ins);
@@ -187,6 +201,34 @@ static void *process_txs_task(void *arg)
     return NULL;
 }
 
+static int wait_until(uint64_t time_ns)
+{
+    uint64_t now = clock_gettime_ns(CLOCK_MONOTONIC);
+
+    if (now > time_ns)
+        return 0;
+
+    if (usleep((time_ns - now) / NS_PER_US) < 0)
+        return -errno;
+
+    return 0;
+}
+
+static int wait_until_next_interval(uint64_t start_ns, uint64_t interval_ns)
+{
+    uint64_t now, next_interval;
+
+    now = clock_gettime_ns(CLOCK_MONOTONIC);
+
+    if (now < start_ns)
+        return -ETIME;
+
+    next_interval = now - ((now - start_ns) % interval_ns);
+    next_interval += interval_ns;
+
+    return wait_until(next_interval);
+}
+
 static int run_client(struct nanoping_instance *ins, int count, int delay, char *host, char *port, bool silent, int dummy_pkt)
 {
     int i;
@@ -195,6 +237,7 @@ static int run_client(struct nanoping_instance *ins, int count, int delay, char 
     struct addrinfo *reminfo;
     pthread_t receive_thread = 0, txs_thread = 0;
     struct timespec started, finished, duration;
+    uint64_t start_send;
     ssize_t pktsize = 0;
     ssize_t siz;
     int res;
@@ -289,15 +332,17 @@ static int run_client(struct nanoping_instance *ins, int count, int delay, char 
     memcpy(&send_request.remaddr, reminfo->ai_addr,
             sizeof(send_request.remaddr));
     send_request.type = msg_ping;
+    start_send = clock_gettime_ns(CLOCK_MONOTONIC);
+
     for (i = 1; !atomic_load(&signal_handled); i++) {
         send_request.seq = i;
         siz = nanoping_send_one(ins, &send_request);
         if (siz < 0)
             return EXIT_FAILURE;
+
         if (!pktsize)
             pktsize = siz;
-        if (delay > 0)
-            usleep(delay);
+
         if (dummy_pkt) {
             struct nanoping_send_dummies_request dummies_request;
             memcpy(&dummies_request.remaddr, reminfo->ai_addr,
@@ -308,6 +353,16 @@ static int run_client(struct nanoping_instance *ins, int count, int delay, char 
             if (res <= 0)
                 return EXIT_FAILURE;
         }
+
+        if (delay > 0) {
+            res = wait_until_next_interval(start_send, delay * NS_PER_US);
+            if (res < 0 && res != EINTR) {
+                fprintf(stderr, "Failed waiting until next interval: %s\n",
+                        strerror(-res));
+                return EXIT_FAILURE;
+            }
+        }
+
     }
 
     atomic_store(&state, msg_fin);
