@@ -376,12 +376,12 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt, 
             }
             txs_started = true;
         }
-        siz = nanoping_receive_one(ins, &receive_result);
-        if (siz == -EAGAIN && persistent && atomic_load(&state) == msg_none) {
+        res = nanoping_receive_one(ins, &receive_result);
+        if (res == -EAGAIN && persistent && atomic_load(&state) == msg_none) {
             nanoping_reset_state(ins);
             nanoping_wait_for_receive(ins);
             continue;
-        } else if (siz < 0) {
+        } else if (res < 0) {
             return EXIT_FAILURE;
         }
 
@@ -447,14 +447,14 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt, 
                     fprintf(stderr, "received message (msg_ping) is inconsistent with current state, ignoreing\n");
                     break;
                 }
-                if (!pktsize)
-                    pktsize = siz;
-
                 send_request.seq = receive_result.seq;
                 send_request.remaddr = receive_result.remaddr;
                 send_request.type = msg_pong;
-                if (nanoping_send_one(ins, &send_request) < 0)
+                if ((siz = nanoping_send_one(ins, &send_request)) < 0)
                     return EXIT_FAILURE;
+                if (!pktsize)
+                    pktsize = siz;
+
                 if (dummy_pkt) {
                     struct nanoping_send_dummies_request dummies_request;
                     dummies_request.remaddr = receive_result.remaddr;
