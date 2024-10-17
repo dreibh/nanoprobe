@@ -50,7 +50,6 @@ static atomic_bool signal_handled = ATOMIC_VAR_INIT(false);
 static _Atomic enum nanoping_msg_type state = ATOMIC_VAR_INIT(msg_none);
 static pthread_mutex_t signal_lock;
 static pthread_cond_t signal_cond;
-static pthread_t signal_thread = 0;
 static void usage(void)
 {
     fprintf(stderr, "usage:\n");
@@ -181,9 +180,10 @@ static void *process_client_receive_task(void *arg)
 static void *process_client_signal_task(void *arg)
 {
     sigset_t sigmask = *(sigset_t *)arg;
+    int err;
 
-    if (sigprocmask(SIG_SETMASK, &sigmask, NULL) < 0) {
-        perror("sigprocmask");
+    if (pthread_sigmask(SIG_BLOCK, &sigmask, NULL) < 0) {
+        perror("pthread_sigmask");
         return NULL;
     }
 
@@ -194,7 +194,9 @@ static void *process_client_signal_task(void *arg)
     for (;;) {
         int sig;
         enum nanoping_msg_type s;
-        if (sigwait(&sigmask, &sig) < 0) {
+        err = sigwait(&sigmask, &sig);
+        if (err) {
+            errno = err;
             perror("sigwait");
             return NULL;
         }
@@ -223,6 +225,218 @@ static void *process_txs_task(void *arg)
     for (;;)
         nanoping_txs_one(ins);
     return NULL;
+}
+
+struct pthread_thread {
+    pthread_t thread;
+    bool valid;
+};
+
+static int close_threads(struct pthread_thread *threads[], size_t n_threads)
+{
+    int i, err, first_err = 0;
+
+    for (i = 0; i < n_threads; i++) {
+        if (!threads[i]->valid)
+            continue;
+
+        err = pthread_cancel(threads[i]->thread);
+        if (err) {
+            errno = err;
+            perror("pthread_cancel");
+            first_err = first_err ?: -err;
+        }
+
+        err = pthread_join(threads[i]->thread, NULL);
+        if (err) {
+            errno = err;
+            perror("pthread_join");
+            first_err = first_err ?: -err;
+        }
+
+        threads[i]->valid = false;
+    }
+
+    return first_err;
+}
+
+static int setup_singal_handling(struct pthread_thread *signal_thread)
+{
+    int err;
+    static sigset_t sigmask; // static so that it's still valid for signal thread after this function finishes
+
+    pthread_mutex_init(&signal_lock, NULL);
+    pthread_cond_init(&signal_cond, NULL);
+    signal_thread->valid = false;
+
+    if (sigemptyset(&sigmask) < 0) {
+        perror("sigemptyset");
+        return -errno;
+    }
+    if (sigaddset(&sigmask, SIGINT) < 0) {
+        perror("sigaddset(SIGINT)");
+        return -errno;
+    }
+    if (sigaddset(&sigmask, SIGALRM) < 0) {
+        perror("sigaddset(SIGALARM)");
+        return -errno;
+    }
+    if (pthread_sigmask(SIG_BLOCK, &sigmask, NULL) < 0) {
+        perror("pthread_sigmask");
+        return -errno;
+    }
+
+    if ((err = pthread_create(&signal_thread->thread, NULL,
+                              process_client_signal_task, &sigmask))) {
+        errno = err;
+        perror("pthread_create(signal_thread)");
+        return -err;
+    }
+    signal_thread->valid = true;
+
+    if (!atomic_load(&signal_initialized)) {
+        pthread_mutex_lock(&signal_lock);
+        pthread_cond_wait(&signal_cond, &signal_lock);
+        pthread_mutex_unlock(&signal_lock);
+    }
+
+    return 0;
+}
+
+static int setup_txtstamp_thread(struct pthread_thread *txs_thread,
+                                 struct nanoping_instance *ins)
+{
+    int err;
+
+    txs_thread->valid = false;
+
+    if ((err = pthread_create(&txs_thread->thread, NULL, process_txs_task,
+                              ins))) {
+        errno = err;
+        perror("pthread_create(txs_thread)");
+        return -err;
+    }
+    txs_thread->valid = true;
+
+    return 0;
+}
+
+static int setup_receive_thread(struct pthread_thread *receive_thread,
+                                struct nanoping_instance *ins)
+{
+    int err;
+
+    receive_thread->valid = false;
+
+    if ((err = pthread_create(&receive_thread->thread, NULL,
+                              process_client_receive_task, ins))) {
+        errno = err;
+        perror("pthread_create(receive_thread)");
+        return -err;
+    }
+    receive_thread->valid = true;
+
+    return 0;
+}
+
+static int setup_client_threads(struct nanoping_instance *ins,
+                                struct pthread_thread *signal_thread,
+                                struct pthread_thread *txs_thread,
+                                struct pthread_thread *receive_thread)
+{
+    struct pthread_thread *threads[] = {signal_thread, txs_thread, receive_thread};
+    int err;
+
+    /*
+     * setup_signal_handling() needs to run before other threads are created,
+     * because it sets the signal mask for the base-thread which other threads
+     * will inherit.
+     */
+    err = setup_singal_handling(signal_thread);
+    if (err)
+        return err;
+
+    err = setup_txtstamp_thread(txs_thread, ins);
+    if (err)
+        goto err_threads;
+
+    err = setup_receive_thread(receive_thread, ins);
+    if (err)
+        goto err_threads;
+
+    return 0;
+
+err_threads:
+    close_threads(threads, ARRAY_SIZE(threads));
+    return err;
+}
+
+static int setup_server_threads(struct nanoping_instance *ins,
+                                struct pthread_thread *txs_thread)
+{
+    return setup_txtstamp_thread(txs_thread, ins);
+}
+
+static int client_handshake(const struct sockaddr_in *remaddr,
+                            struct nanoping_instance *ins)
+{
+    struct nanoping_send_request send_request = {0};
+    bool first_time = true;
+    int err;
+
+    memcpy(&send_request.remaddr, remaddr, sizeof(send_request.remaddr));
+    send_request.type = msg_syn;
+    send_request.seq = 0;
+
+    atomic_store(&state, msg_syn);
+    while (atomic_load(&state) == msg_syn) {
+        if ((err = nanoping_send_one(ins, &send_request) < 0)) {
+            return err;
+        }
+
+        if (first_time) {
+            first_time = false;
+            usleep(50000);
+        } else {
+            usleep(500000);
+        }
+    }
+
+    if (atomic_load(&state) != msg_syn_ack)
+        return -EBADE;
+    atomic_store(&state, msg_ping);
+
+    return 0;
+}
+
+static int client_fin(const struct sockaddr_in *remaddr, uint64_t request_num,
+                      struct nanoping_instance *ins)
+{
+    struct nanoping_send_request send_request;
+    bool first_time = true;
+    int err;
+
+    memcpy(&send_request.remaddr, remaddr, sizeof(send_request.remaddr));
+    send_request.type = msg_fin;
+    send_request.seq = request_num;
+
+    atomic_store(&state, msg_fin);
+    while (atomic_load(&state) == msg_fin) {
+        if ((err = nanoping_send_one(ins, &send_request)) < 0)
+            return err;
+
+        if (first_time) {
+            first_time = false;
+            usleep(50000);
+        } else {
+            usleep(500000);
+        }
+    }
+
+    if (atomic_load(&state) != msg_fin_ack)
+        return -EBADE;
+
+    return 0;
 }
 
 static int wait_until(uint64_t time_ns, enum timer_type ttype)
@@ -263,105 +477,17 @@ static int wait_until_next_interval(uint64_t start_ns, uint64_t interval_ns,
     return wait_until(next_interval, ttype);
 }
 
-static int run_client(struct nanoping_instance *ins, int count, int delay,
-                      char *host, char *port, int dummy_pkt,
-                      enum timer_type ttype)
+static int client_sendloop(const struct sockaddr_in *remaddr,
+                           struct nanoping_instance *ins, int delay_us,
+                           enum timer_type ttype, int dummy_pkt,
+                           uint64_t *next_seq, ssize_t *sent_pktsize)
 {
-    int i;
-    struct nanoping_send_request send_request = {0};
-    struct addrinfo *reminfo;
-    pthread_t receive_thread = 0, txs_thread = 0;
-    struct timespec started, finished, duration;
-    uint64_t start_send;
-    ssize_t pktsize = 0;
-    ssize_t siz;
+    struct nanoping_send_request send_request;
+    ssize_t siz, pktsize = 0;
+    uint64_t start_send, i;
     int res;
-    sigset_t sigmask;
 
-    pthread_mutex_init(&signal_lock, NULL);
-    pthread_cond_init(&signal_cond, NULL);
-
-    if (sigemptyset(&sigmask) < 0) {
-        perror("sigemptyset");
-        return EXIT_FAILURE;
-    }
-    if (sigaddset(&sigmask, SIGINT) < 0) {
-        perror("sigaddset");
-        return EXIT_FAILURE;
-    }
-    if (sigaddset(&sigmask, SIGALRM) < 0) {
-        perror("sigaddset");
-        return EXIT_FAILURE;
-    }
-    if (sigprocmask(SIG_SETMASK, &sigmask, NULL) < 0) {
-        perror("sigprocmask");
-        return EXIT_FAILURE;
-    }
-    if (pthread_create(&signal_thread, NULL, process_client_signal_task, &sigmask) < 0) {
-        perror("pthread_create");
-        return EXIT_FAILURE;
-    }
-    if (pthread_detach(signal_thread) < 0) {
-        perror("pthread_detach");
-        return EXIT_FAILURE;
-    }
-
-    if (!atomic_load(&signal_initialized)) {
-        pthread_mutex_lock(&signal_lock);
-        pthread_cond_wait(&signal_cond, &signal_lock);
-        pthread_mutex_unlock(&signal_lock);
-    }
-
-    printf("nanoping %s:%s...\n", host, port);
-    if ((res = getaddrinfo(host, port, NULL, &reminfo)) < 0) {
-        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(res));
-        return EXIT_FAILURE;
-    }
-
-    if ((res = clock_gettime(CLOCK_MONOTONIC, &started))) {
-        perror("clock_gettime");
-        return res;
-    }
-
-    if (pthread_create(&receive_thread, NULL, process_client_receive_task, ins) < 0) {
-        perror("pthread_create");
-        return EXIT_FAILURE;
-    }
-
-    if (pthread_create(&txs_thread, NULL, process_txs_task, ins) < 0) {
-        perror("pthread_create");
-        return EXIT_FAILURE;
-    }
-
-    if (count) {
-        alarm(count);
-    }
-
-    atomic_store(&state, msg_syn);
-    memcpy(&send_request.remaddr, reminfo->ai_addr,
-            sizeof(send_request.remaddr));
-    send_request.type = msg_syn;
-    send_request.seq = 0;
-    for(bool first_time = true;;) {
-        if (nanoping_send_one(ins, &send_request) < 0) {
-            return EXIT_FAILURE;
-        }
-        if (first_time) {
-            first_time = false;
-            usleep(50000);
-        }else{
-            usleep(500000);
-        }
-        if (atomic_load(&state) != msg_syn)
-            break;
-    }
-
-    if (atomic_load(&state) != msg_syn_ack)
-        return EXIT_FAILURE;
-
-    atomic_store(&state, msg_ping);
-    memcpy(&send_request.remaddr, reminfo->ai_addr,
-            sizeof(send_request.remaddr));
+    memcpy(&send_request.remaddr, remaddr, sizeof(send_request.remaddr));
     send_request.type = msg_ping;
     start_send = clock_gettime_ns(CLOCK_MONOTONIC);
 
@@ -369,196 +495,281 @@ static int run_client(struct nanoping_instance *ins, int count, int delay,
         send_request.seq = i;
         siz = nanoping_send_one(ins, &send_request);
         if (siz < 0)
-            return EXIT_FAILURE;
+            return siz;
 
         if (!pktsize)
             pktsize = siz;
 
-        if (dummy_pkt) {
+        if (dummy_pkt > 0) {
             struct nanoping_send_dummies_request dummies_request;
-            memcpy(&dummies_request.remaddr, reminfo->ai_addr,
-                sizeof(dummies_request.remaddr));
+            memcpy(&dummies_request.remaddr, remaddr,
+                   sizeof(dummies_request.remaddr));
             dummies_request.nmsg = dummy_pkt;
 
             res = nanoping_send_dummies(ins, &dummies_request);
             if (res <= 0)
-                return EXIT_FAILURE;
+                return res;
         }
 
-        if (delay > 0) {
-            res = wait_until_next_interval(start_send, delay * NS_PER_US,
+        if (delay_us > 0) {
+            res = wait_until_next_interval(start_send, delay_us * NS_PER_US,
                                            ttype);
             if (res < 0 && res != EINTR) {
                 fprintf(stderr, "Failed waiting until next interval: %s\n",
                         strerror(-res));
-                return EXIT_FAILURE;
+                return res;
             }
         }
 
     }
 
-    atomic_store(&state, msg_fin);
-    send_request.type = msg_fin;
-    send_request.seq = i;
-    for(bool first_time = true;;) {
-        if (nanoping_send_one(ins, &send_request) < 0)
-            return EXIT_FAILURE;
-        if (first_time) {
-            first_time = false;
-            usleep(50000);
-        }else{
-            usleep(500000);
-        }
-        if (atomic_load(&state) != msg_fin)
-            break;
+    if (next_seq)
+        *next_seq = i;
+    if (sent_pktsize)
+        *sent_pktsize = pktsize;
+    return 0;
+}
+
+static int run_client_ping_sequence(struct nanoping_instance *ins,
+                                    struct sockaddr_in *remaddr,
+                                    int delay, enum timer_type ttype,
+                                    int dummy_pkt, ssize_t *packet_size)
+{
+    uint64_t next_seq;
+    int res;
+
+    res = client_sendloop(remaddr, ins, delay, ttype, dummy_pkt, &next_seq,
+                          packet_size);
+    if (res)
+        return res;
+
+    res = client_fin(remaddr, next_seq, ins);
+    if (res)
+        return res;
+
+    return 0;
+
+}
+
+static void prepare_server_reply(struct nanoping_send_request *send_request,
+                                 const struct nanoping_receive_result *receive_result,
+                                 enum nanoping_msg_type msg_type) {
+    send_request->seq = receive_result->seq;
+    send_request->remaddr = receive_result->remaddr;
+    send_request->type = msg_type;
+}
+
+static int server_handshake(struct nanoping_instance *ins)
+{
+    struct nanoping_receive_result receive_result = {0};
+    struct nanoping_send_request send_request = {0};
+    int res;
+
+    // Wait for SYN
+    while (receive_result.type != msg_syn) {
+        memset(&receive_result, 0, sizeof(receive_result));
+
+        nanoping_wait_for_receive(ins);
+        res = nanoping_receive_one(ins, &receive_result);
+        if (res < 0)
+            return res;
+
+        if (receive_result.type != msg_syn)
+            fprintf(stderr, "Packet of unexpected type (%d) while waiting for SYN, ignoring\n",
+                    receive_result.type);
     }
 
-    if ((res = clock_gettime(CLOCK_MONOTONIC, &finished))) {
-        perror("clock_gettime");
+    // Send SYN-ACK
+    prepare_server_reply(&send_request, &receive_result, msg_syn_ack);
+    res = nanoping_send_one(ins, &send_request);
+    if (res < 0)
         return res;
+
+    printf("Connected to client.\n");
+    atomic_store(&state, msg_pong);
+
+    return 0;
+}
+
+static int server_handle_ping(struct nanoping_instance *ins,
+                              const struct nanoping_receive_result *receive_result,
+                              int dummy_pkt, ssize_t *pktsize)
+{
+    struct nanoping_send_dummies_request dummies_request;
+    struct nanoping_send_request send_request = {0};
+    int res;
+
+    switch (receive_result->type) {
+        case msg_syn:
+            prepare_server_reply(&send_request, receive_result, msg_syn_rst);
+            res = nanoping_send_one(ins, &send_request);
+            if (res < 0)
+                return res;
+            fprintf(stderr, "Connection already established, drop new connection request.\n");
+            break;
+        case msg_fin:
+            prepare_server_reply(&send_request, receive_result, msg_fin_ack);
+            res = nanoping_send_one(ins, &send_request);
+            if (res < 0)
+                return res;
+
+            atomic_store(&state, msg_none);
+            printf("Client disconnected.\n");
+            break;
+        case msg_ping:
+            if (atomic_load(&state) != msg_pong) {
+                fprintf(stderr, "received message (msg_ping) is inconsistent with current state, ignoreing\n");
+                break;
+            }
+            prepare_server_reply(&send_request, receive_result, msg_pong);
+            res = nanoping_send_one(ins, &send_request);
+            if (res < 0)
+                return res;
+            if (pktsize)
+                *pktsize = res;
+
+            if (dummy_pkt) {
+                dummies_request.remaddr = receive_result->remaddr;
+                dummies_request.nmsg = dummy_pkt;
+
+                res = nanoping_send_dummies(ins, &dummies_request);
+                if (res <= 0)
+                    return res;
+            }
+            break;
+        case msg_dummy:
+            /* do nothing */
+            break;
+        default:
+            fprintf(stderr, "Illegal packet received, ignoring.\n");
+    }
+
+    return receive_result->type;
+}
+
+static int server_echoloop(struct nanoping_instance *ins, int dummy_pkt,
+                           ssize_t *sent_pktsize)
+{
+    struct nanoping_receive_result receive_result;
+    ssize_t pktsize = 0;
+    int res;
+
+    while (atomic_load(&state) == msg_pong) {
+        memset(&receive_result, 0, sizeof(receive_result));
+
+        res = nanoping_receive_one(ins, &receive_result);
+        if (res < 0)
+            return res;
+
+        res = server_handle_ping(ins, &receive_result, dummy_pkt,
+                                 pktsize == 0 ? &pktsize : NULL);
+        if (res < 0)
+            return res;
+    }
+
+    if (sent_pktsize)
+        *sent_pktsize = pktsize;
+
+    return 0;
+}
+
+static int run_client(struct nanoping_instance *ins, int count, int delay,
+                      char *host, char *port, int dummy_pkt,
+                      enum timer_type ttype)
+{
+    struct addrinfo *reminfo;
+    struct pthread_thread signal_thread = {0};
+    struct pthread_thread txs_thread = {0};
+    struct pthread_thread receive_thread = {0};
+    struct pthread_thread *threads[] = {&signal_thread, &txs_thread, &receive_thread};
+    struct timespec started, finished, duration;
+    ssize_t pktsize = 0;
+    int err;
+
+    err = getaddrinfo(host, port, NULL, &reminfo);
+    if (err) {
+        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(err));
+        return EXIT_FAILURE;
+    }
+
+    err = setup_client_threads(ins, &signal_thread, &txs_thread, &receive_thread);
+    if (err) {
+        fprintf(stderr, "Failed setting up client threads: %s\n", strerror(-err));
+        return EXIT_FAILURE;
+    }
+
+    if (count > 0) {
+        alarm(count);
+    }
+
+    printf("nanoping %s:%s...\n", host, port);
+
+
+    err = client_handshake((struct sockaddr_in *)reminfo->ai_addr, ins);
+    if (err)
+        return EXIT_FAILURE;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &started)) {
+        perror("clock_gettime(started)");
+        return EXIT_FAILURE;
+    }
+
+    err = run_client_ping_sequence(ins, (struct sockaddr_in *)reminfo->ai_addr,
+				   delay, ttype, dummy_pkt, &pktsize);
+    if (err)
+        return EXIT_FAILURE;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &finished)) {
+        perror("clock_gettime");
+        return EXIT_FAILURE;
     }
     timevalsub(&finished, &started, &duration);
-
-    if (pthread_cancel(receive_thread)) {
-        perror("pthread_cancel");
-        return EXIT_FAILURE;
-    }
-    if (pthread_join(receive_thread, NULL)) {
-        perror("pthread_join");
-        return EXIT_FAILURE;
-    }
-    if (pthread_cancel(txs_thread)) {
-        perror("pthread_cancel");
-        return EXIT_FAILURE;
-    }
-    if (pthread_join(txs_thread, NULL)) {
-        perror("pthread_join");
-        return EXIT_FAILURE;
-    }
-
     dump_statistics(ins, &duration, true, pktsize);
+
+    close_threads(threads, ARRAY_SIZE(threads));
 
     return EXIT_SUCCESS;
 }
 
-static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt, bool persistent)
+static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt,
+                      bool persistent)
 {
-    pthread_t txs_thread = 0;
-    bool txs_started = false;
+    struct pthread_thread txs_thread = {0};
+    struct pthread_thread *threads[] = {&txs_thread};
     struct timespec started, finished, duration;
     ssize_t pktsize = 0;
+    int err;
+
+    err = setup_server_threads(ins, &txs_thread);
+    if (err) {
+        fprintf(stderr, "Failed setting up server threads: %s\n", strerror(-err));
+        return EXIT_FAILURE;
+    }
 
     printf("nanoping server started on port %s.\n", port);
-    nanoping_wait_for_receive(ins);
-    for (;;) {
-        struct nanoping_receive_result receive_result = {0};
-        struct nanoping_send_request send_request = {0};
-        ssize_t siz;
-        int res;
 
-        if (!txs_started) {
-            if (pthread_create(&txs_thread, NULL, process_txs_task, ins) < 0) {
-                perror("pthread_create");
-                return EXIT_FAILURE;
-            }
-            txs_started = true;
-        }
-        res = nanoping_receive_one(ins, &receive_result);
-        if (res == -EAGAIN && persistent && atomic_load(&state) == msg_none) {
-            nanoping_reset_state(ins);
-            nanoping_wait_for_receive(ins);
-            continue;
-        } else if (res < 0) {
-            return EXIT_FAILURE;
-        }
+    err = server_handshake(ins);
+    if (err)
+        return EXIT_FAILURE;
 
-        switch (receive_result.type) {
-            case msg_syn:
-                if (atomic_load(&state) == msg_none) {
-                    atomic_store(&state, msg_pong);
-                    send_request.seq = receive_result.seq;
-                    send_request.remaddr = receive_result.remaddr;
-                    send_request.type = msg_syn_ack;
-                    if (nanoping_send_one(ins, &send_request) < 0)
-                        return EXIT_FAILURE;
-                    printf("Client connected.\n");
-                    if ((res = clock_gettime(CLOCK_MONOTONIC, &started))) {
-                        perror("clock_gettime");
-                        return res;
-                    }
-                }else{
-                    send_request.seq = receive_result.seq;
-                    send_request.remaddr = receive_result.remaddr;
-                    send_request.type = msg_syn_rst;
-                    if (nanoping_send_one(ins, &send_request) < 0)
-                        return EXIT_FAILURE;
-                    printf("Connection already established, drop new connection request.\n");
-                }
-                break;
-            case msg_fin:
-                send_request.seq = receive_result.seq;
-                send_request.remaddr = receive_result.remaddr;
-                send_request.type = msg_fin_ack;
-                if (nanoping_send_one(ins, &send_request) < 0)
-                    return EXIT_FAILURE;
-
-                if (atomic_load(&state) != msg_pong) {
-                    break;
-                }
-                if (pthread_cancel(txs_thread)) {
-                    perror("pthread_cancel");
-                    return EXIT_FAILURE;
-                }
-                if (pthread_join(txs_thread, NULL)) {
-                    perror("pthread_join");
-                    return EXIT_FAILURE;
-                }
-                txs_started = false;
-                atomic_store(&state, msg_none);
-                printf("Client disconnected.\n");
-                if ((res = clock_gettime(CLOCK_MONOTONIC, &finished))) {
-                    perror("clock_gettime");
-                    return res;
-                }
-                timevalsub(&finished, &started, &duration);
-                dump_statistics(ins, &duration, false, pktsize);
-                if (persistent) {
-                    nanoping_reset_state(ins);
-                    nanoping_wait_for_receive(ins);
-                } else {
-                    return EXIT_SUCCESS;
-                }
-                break;
-            case msg_ping:
-                if (atomic_load(&state) != msg_pong) {
-                    fprintf(stderr, "received message (msg_ping) is inconsistent with current state, ignoreing\n");
-                    break;
-                }
-                send_request.seq = receive_result.seq;
-                send_request.remaddr = receive_result.remaddr;
-                send_request.type = msg_pong;
-                if ((siz = nanoping_send_one(ins, &send_request)) < 0)
-                    return EXIT_FAILURE;
-                if (!pktsize)
-                    pktsize = siz;
-
-                if (dummy_pkt) {
-                    struct nanoping_send_dummies_request dummies_request;
-                    dummies_request.remaddr = receive_result.remaddr;
-                    dummies_request.nmsg = dummy_pkt;
-
-                    res = nanoping_send_dummies(ins, &dummies_request);
-                    if (res <= 0)
-                        return EXIT_FAILURE;
-                }
-                break;
-            case msg_dummy:
-                /* do nothing */
-                break;
-            default:
-                printf("Illigal packet received, ignoreing.\n");
-        }
+    if (clock_gettime(CLOCK_MONOTONIC, &started)) {
+        perror("clock_gettime");
+        return EXIT_FAILURE;
     }
+
+    err = server_echoloop(ins, dummy_pkt, &pktsize);
+    if (err)
+        return EXIT_FAILURE;
+
+    // Has received FIN - shutdown
+    if (clock_gettime(CLOCK_MONOTONIC, &finished)) {
+        perror("clock_gettime");
+        return EXIT_FAILURE;
+    }
+    timevalsub(&finished, &started, &duration);
+    dump_statistics(ins, &duration, true, pktsize);
+
+    close_threads(threads, ARRAY_SIZE(threads));
 
     return EXIT_SUCCESS;
 }

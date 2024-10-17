@@ -18,6 +18,8 @@ enum timestamp_index {
     TSTAMP_IDX_RECVPONG = 3,
 };
 
+#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof(arr[0]))
+
 #define timevaladd(tvp, uvp, vvp) \
     do { \
         (vvp)->tv_sec = (tvp)->tv_sec + (uvp)->tv_sec; \

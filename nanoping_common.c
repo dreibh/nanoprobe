@@ -108,7 +108,7 @@ static inline ssize_t send_pkt_common(struct nanoping_instance *ins,
     int res;
 
     m.msg_name = remaddr;
-    m.msg_namelen = sizeof(struct sockaddr_in);
+    m.msg_namelen = sizeof(*remaddr);
     m.msg_iov = iov;
     m.msg_iovlen = 1;
 
@@ -118,7 +118,7 @@ static inline ssize_t send_pkt_common(struct nanoping_instance *ins,
             fprintf(stderr, "sendmsg: Request timed out.\n");
             return siz;
         }
-        perror("sendmsg");
+        perror("sendmsg pkt");
         return siz;
     }
 
@@ -140,7 +140,7 @@ static inline ssize_t send_pkt_common(struct nanoping_instance *ins,
         m2.msg_iovlen = 1;
 
         if ((esiz = sendmsg(ins->emul_fds[0], &m2, 0)) < 0) {
-            perror("sendmsg");
+            perror("sendmsg emul_txs");
             return siz;
         }
         assert(esiz == sizeof(etxs));
