@@ -139,15 +139,9 @@ static void dump_statistics(struct nanoping_instance *ins, struct timespec *dura
             ins->txs_collected);
 }
 
-struct client_task_arg {
-    struct nanoping_instance *ins;
-    char *host;
-};
-
 static void *process_client_receive_task(void *arg)
 {
-    struct client_task_arg *clarg = (struct client_task_arg *)arg;
-    struct nanoping_instance *ins = clarg->ins;
+    struct nanoping_instance *ins = (struct nanoping_instance *)arg;
     struct nanoping_receive_result receive_result = {0};
     ssize_t siz;
 
@@ -274,7 +268,6 @@ static int run_client(struct nanoping_instance *ins, int count, int delay,
                       enum timer_type ttype)
 {
     int i;
-    struct client_task_arg carg = {0};
     struct nanoping_send_request send_request = {0};
     struct addrinfo *reminfo;
     pthread_t receive_thread = 0, txs_thread = 0;
@@ -330,10 +323,7 @@ static int run_client(struct nanoping_instance *ins, int count, int delay,
         return res;
     }
 
-    carg.ins = ins;
-    carg.host = host;
-
-    if (pthread_create(&receive_thread, NULL, process_client_receive_task, &carg) < 0) {
+    if (pthread_create(&receive_thread, NULL, process_client_receive_task, ins) < 0) {
         perror("pthread_create");
         return EXIT_FAILURE;
     }
