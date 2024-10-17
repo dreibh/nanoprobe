@@ -35,7 +35,6 @@ static struct option longopts[] = {
     {"port",       required_argument, NULL, 'p'},
     {"log",        required_argument, NULL, 'l'},
     {"emulation",  no_argument,       NULL, 'e'},
-    {"silent",     no_argument,       NULL, 's'},
     {"timeout",    required_argument, NULL, 't'},
     {"busypoll",   required_argument, NULL, 'b'},
     {"dummy-pkt",  required_argument, NULL, 'x'},
@@ -55,8 +54,8 @@ static pthread_t signal_thread = 0;
 static void usage(void)
 {
     fprintf(stderr, "usage:\n");
-    fprintf(stderr, "  client: nanoping --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [log] --emulation --silent --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] [host]\n");
-    fprintf(stderr, "  server: nanoping --server --interface [nic] --port [port] --log [log] --emulation --silent --timeout [usec] --busypoll [usec] --dummy-pkt [cnt]\n");
+    fprintf(stderr, "  client: nanoping --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [log] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] [host]\n");
+    fprintf(stderr, "  server: nanoping --server --interface [nic] --port [port] --log [log] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt]\n");
 }
 
 inline static double percent_ulong(unsigned long v1, unsigned long v2)
@@ -143,7 +142,6 @@ static void dump_statistics(struct nanoping_instance *ins, struct timespec *dura
 struct client_task_arg {
     struct nanoping_instance *ins;
     char *host;
-    bool silent;
 };
 
 static void *process_client_receive_task(void *arg)
@@ -272,7 +270,7 @@ static int wait_until_next_interval(uint64_t start_ns, uint64_t interval_ns,
 }
 
 static int run_client(struct nanoping_instance *ins, int count, int delay,
-                      char *host, char *port, bool silent, int dummy_pkt,
+                      char *host, char *port, int dummy_pkt,
                       enum timer_type ttype)
 {
     int i;
@@ -334,7 +332,6 @@ static int run_client(struct nanoping_instance *ins, int count, int delay,
 
     carg.ins = ins;
     carg.host = host;
-    carg.silent = silent;
 
     if (pthread_create(&receive_thread, NULL, process_client_receive_task, &carg) < 0) {
         perror("pthread_create");
@@ -588,7 +585,6 @@ int main(int argc, char **argv)
     char *port = "10666";
     char *log = NULL;
     bool emulation = false;
-    bool silent = false;
     bool persistent = false;
     int timeout = 5000000;
     int busy_poll = 0;
@@ -611,7 +607,7 @@ int main(int argc, char **argv)
 	usage();
 	return EXIT_FAILURE;
     }
-    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:est:B:b:RT:h", longopts, NULL)) != -1) {
+    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:et:B:b:RT:h", longopts, NULL)) != -1) {
         switch (c) {
             case 'i':
                 interface = optarg;
@@ -630,9 +626,6 @@ int main(int argc, char **argv)
                 break;
             case 'e':
                 emulation = true;
-                break;
-            case 's':
-                silent = true;
                 break;
             case 't':
                 timeout = atoi(optarg);
@@ -695,7 +688,7 @@ int main(int argc, char **argv)
     }
 
     if (mode == mode_client) {
-        res = run_client(ins, count, delay, host, port, silent, dummy_pkt, ttype);
+        res = run_client(ins, count, delay, host, port, dummy_pkt, ttype);
     } else {
         res = run_server(ins, port, dummy_pkt, persistent);
     }
