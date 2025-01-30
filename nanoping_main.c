@@ -13,6 +13,7 @@
 #include <assert.h>
 #include <stdatomic.h>
 #include <errno.h>
+#include <arpa/inet.h>
 #include "nanoping.h"
 
 enum timer_type {
@@ -152,7 +153,8 @@ static void *process_client_receive_task(void *arg)
 
         switch (receive_result.type) {
             case msg_syn_ack:
-                atomic_store(&state, msg_syn_ack);
+                if (atomic_load(&state) == msg_syn)
+                    atomic_store(&state, msg_syn_ack);
                 break;
             case msg_syn_rst:
                 if (atomic_load(&state) != msg_syn)
@@ -558,10 +560,12 @@ static void prepare_server_reply(struct nanoping_send_request *send_request,
     send_request->type = msg_type;
 }
 
-static int server_handshake(struct nanoping_instance *ins)
+static int server_handshake(struct nanoping_instance *ins,
+                            struct sockaddr_in *remaddr)
 {
     struct nanoping_receive_result receive_result = {0};
     struct nanoping_send_request send_request = {0};
+    char buf[INET6_ADDRSTRLEN] = "";
     int res;
 
     // Wait for SYN
@@ -584,8 +588,40 @@ static int server_handshake(struct nanoping_instance *ins)
     if (res < 0)
         return res;
 
-    printf("Connected to client.\n");
+    inet_ntop(receive_result.remaddr.sin_family,
+              &receive_result.remaddr.sin_addr, buf, sizeof(buf));
+    printf("Connected to client %s:%u\n", buf,
+           ntohs(receive_result.remaddr.sin_port));
+
     atomic_store(&state, msg_pong);
+    *remaddr = receive_result.remaddr;
+    return 0;
+}
+
+static int server_handle_foreign_packet(struct nanoping_instance *ins,
+                                        const struct nanoping_receive_result *receive_result)
+{
+    struct nanoping_send_request send_request = {0};
+    char ip_str[INET6_ADDRSTRLEN] = "";
+    char *type_str;
+    int res;
+
+    if (receive_result->type == msg_syn) {
+        prepare_server_reply(&send_request, receive_result, msg_syn_rst);
+        res = nanoping_send_one(ins, &send_request);
+        if (res < 0)
+            return res;
+
+        type_str = "new connection request";
+    } else {
+        // Ignore non-SYN packets from non-connected clients
+        type_str = "packet";
+    }
+
+    inet_ntop(receive_result->remaddr.sin_family,
+              &receive_result->remaddr.sin_addr, ip_str, sizeof(ip_str));
+    fprintf(stderr, "Connection already established, drop %s from %s:%u.\n",
+            type_str, ip_str, ntohs(receive_result->remaddr.sin_port));
 
     return 0;
 }
@@ -600,11 +636,11 @@ static int server_handle_ping(struct nanoping_instance *ins,
 
     switch (receive_result->type) {
         case msg_syn:
-            prepare_server_reply(&send_request, receive_result, msg_syn_rst);
+            // SYN-ACK to client must have been lost, resend
+            prepare_server_reply(&send_request, receive_result, msg_syn_ack);
             res = nanoping_send_one(ins, &send_request);
             if (res < 0)
                 return res;
-            fprintf(stderr, "Connection already established, drop new connection request.\n");
             break;
         case msg_fin:
             prepare_server_reply(&send_request, receive_result, msg_fin_ack);
@@ -617,7 +653,7 @@ static int server_handle_ping(struct nanoping_instance *ins,
             break;
         case msg_ping:
             if (atomic_load(&state) != msg_pong) {
-                fprintf(stderr, "received message (msg_ping) is inconsistent with current state, ignoreing\n");
+                fprintf(stderr, "received message (msg_ping) is inconsistent with current state, ignoring\n");
                 break;
             }
             prepare_server_reply(&send_request, receive_result, msg_pong);
@@ -646,7 +682,8 @@ static int server_handle_ping(struct nanoping_instance *ins,
     return receive_result->type;
 }
 
-static int server_echoloop(struct nanoping_instance *ins, int dummy_pkt,
+static int server_echoloop(struct nanoping_instance *ins,
+                           const struct sockaddr_in *remaddr, int dummy_pkt,
                            ssize_t *sent_pktsize)
 {
     struct nanoping_receive_result receive_result;
@@ -660,8 +697,11 @@ static int server_echoloop(struct nanoping_instance *ins, int dummy_pkt,
         if (res < 0)
             return res;
 
-        res = server_handle_ping(ins, &receive_result, dummy_pkt,
+        if (memcmp(&receive_result.remaddr, remaddr, sizeof(*remaddr)) == 0)
+            res = server_handle_ping(ins, &receive_result, dummy_pkt,
                                  pktsize == 0 ? &pktsize : NULL);
+        else
+            res = server_handle_foreign_packet(ins, &receive_result);
         if (res < 0)
             return res;
     }
@@ -735,6 +775,7 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt)
     struct pthread_thread txs_thread = {0};
     struct pthread_thread *threads[] = {&txs_thread};
     struct timespec started, finished, duration;
+    struct sockaddr_in remaddr;
     ssize_t pktsize = 0;
     int err;
 
@@ -746,7 +787,8 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt)
 
     printf("nanoping server started on port %s.\n", port);
 
-    err = server_handshake(ins);
+
+    err = server_handshake(ins, &remaddr);
     if (err)
         return EXIT_FAILURE;
 
@@ -755,7 +797,8 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt)
         return EXIT_FAILURE;
     }
 
-    err = server_echoloop(ins, dummy_pkt, &pktsize);
+
+    err = server_echoloop(ins, &remaddr, dummy_pkt, &pktsize);
     if (err)
         return EXIT_FAILURE;
 
