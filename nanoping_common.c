@@ -33,6 +33,7 @@ _Static_assert(sizeof(struct nanoping_msg) == 16,
 struct nanoping_emul_txs {
     uint64_t seq;
     struct timespec stamp;
+    uint8_t type;
 };
 
 static int get_if_address(int fd, char *ifname, struct in_addr *addr)
@@ -103,7 +104,7 @@ static int enable_hw_timestamp(int fd, char *ifname)
 static inline ssize_t send_pkt_common(struct nanoping_instance *ins,
                                       struct sockaddr_in *remaddr,
                                       struct iovec *iov, size_t iov_len,
-                                      uint64_t seq)
+                                      uint64_t seq, enum nanoping_msg_type type)
 {
     struct msghdr m = {0};
     ssize_t siz;
@@ -138,6 +139,7 @@ static inline ssize_t send_pkt_common(struct nanoping_instance *ins,
 
         etxs.seq = seq;
         etxs.stamp = st;
+        etxs.type = type;
         m2.msg_iov = &iov2;
         m2.msg_iovlen = 1;
 
@@ -170,7 +172,7 @@ static inline ssize_t send_pkt_msg(struct nanoping_instance *ins,
         iov[1].iov_len = ins->pad_bytes;
     }
 
-    return send_pkt_common(ins, remaddr, iov, ARRAY_SIZE(iov), seq);
+    return send_pkt_common(ins, remaddr, iov, ARRAY_SIZE(iov), seq, type);
 }
 
 static int parse_control_msg(struct msghdr *m, struct timespec *stamp,
@@ -550,9 +552,10 @@ int nanoping_txs_one(struct nanoping_instance *ins)
         }
         assert(siz == sizeof(etxs));
         ins->txs_collected++;
-        // Don't know packet type, so guessing type based on if server or not
-        log_pkt_tstamp(ins, etxs.seq, &etxs.stamp,
-                       ins->server ? TSTAMP_IDX_SENDPONG : TSTAMP_IDX_SENDPING);
+        if (etxs.type == msg_ping || etxs.type == msg_pong)
+            log_pkt_tstamp(ins, etxs.seq, &etxs.stamp,
+                           etxs.type == msg_ping ? TSTAMP_IDX_SENDPING :
+                                                   TSTAMP_IDX_SENDPONG);
         return 0;
     }
     FD_ZERO(&exceptfds);
@@ -596,9 +599,10 @@ int nanoping_txs_one(struct nanoping_instance *ins)
 
     if (stamp_found) {
         ins->txs_collected++;
-        log_pkt_tstamp(ins, msg->seq, &stamp,
-                       msg->type == msg_ping ? TSTAMP_IDX_SENDPING :
-                                               TSTAMP_IDX_SENDPONG);
+        if (msg->type == msg_ping || msg->type == msg_pong)
+            log_pkt_tstamp(ins, msg->seq, &stamp,
+                           msg->type == msg_ping ? TSTAMP_IDX_SENDPING :
+                                                   TSTAMP_IDX_SENDPONG);
     }
 
     return 0;
