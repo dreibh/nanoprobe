@@ -85,22 +85,6 @@ inline static double percent_ulong(unsigned long v1, unsigned long v2)
     return (((double)(v1 - v2)) * 100) / v1;
 }
 
-#define timevalprint_ns(tvp) \
-    do { \
-        if ((tvp)->tv_sec) \
-            printf("%ld", (tvp)->tv_sec); \
-        printf("%ld", (tvp)->tv_nsec); \
-    } while (0)
-
-#define timevalprint_s(tvp) \
-    do { \
-        if ((tvp)->tv_sec) \
-            printf("%ld.", (tvp)->tv_sec); \
-        else \
-            printf("0."); \
-        printf("%ld", (tvp)->tv_nsec); \
-    } while (0)
-
 static uint64_t timespec_to_ns(const struct timespec *ts)
 {
     return (uint64_t)ts->tv_sec * NS_PER_S + ts->tv_nsec;
@@ -153,26 +137,31 @@ static const char *testdirection_to_str(enum test_direction direction)
     }
 }
 
-static void dump_statistics(struct nanoping_instance *ins, struct timespec *duration, bool client, size_t size)
+static void dump_statistics(struct nanoping_instance *ins,
+                            struct timespec *duration, size_t size,
+                            bool calc_pktloss)
 {
     assert(ins);
     assert(duration);
 
+    double duration_s = duration->tv_sec + (double)duration->tv_nsec / NS_PER_S;
+
     printf("--- nanoping statistics ---\n");
-    printf("packet size %zd bytes\n",
-            size);
-    printf("%lu packets transmitted, %lu received, ",
-            ins->pkt_transmitted,
-            ins->pkt_received);
-    if (client)
-	    printf("%f%% packet loss, ",
+    printf("packet size %zd bytes, time %ld.%09ld s\n",
+           size, duration->tv_sec, duration->tv_nsec);
+    printf("%lu packets transmitted (%.1f pps), %lu received (%.1f pps)",
+           ins->pkt_transmitted, ins->pkt_transmitted / duration_s,
+           ins->pkt_received, ins->pkt_received / duration_s);
+    if (calc_pktloss)
+	    printf(", %f%% packet loss\n",
             percent_ulong(ins->pkt_transmitted, ins->pkt_received));
-    printf("time ");
-    timevalprint_s(duration);
-    printf(" s\n");
-    printf("%lu RX stamp collected, %lu TX stamp collected\n",
-            ins->rxs_collected,
-            ins->txs_collected);
+    else
+        printf("\n");
+    printf("%lu TX stamp collected (%.2f%%), %lu RX stamp collected (%.2f%%)\n",
+           ins->txs_collected,
+           (double)ins->txs_collected / ins->pkt_transmitted * 100,
+           ins->rxs_collected,
+           (double)ins->rxs_collected / ins->pkt_received * 100);
 }
 
 static void *process_client_receive_task(void *arg)
@@ -526,7 +515,8 @@ static int wait_until_next_interval(uint64_t start_ns, uint64_t interval_ns,
 static int client_sendloop(const struct sockaddr_in *remaddr,
                            struct nanoping_instance *ins, int delay_us,
                            enum timer_type ttype, int dummy_pkt,
-                           uint64_t *next_seq, ssize_t *sent_pktsize)
+                           uint64_t *next_seq, ssize_t *sent_pktsize,
+                           struct timespec *start, struct timespec *end)
 {
     struct nanoping_send_request send_request;
     ssize_t siz, pktsize = 0;
@@ -569,6 +559,12 @@ static int client_sendloop(const struct sockaddr_in *remaddr,
 
     }
 
+    if (end)
+        clock_gettime(CLOCK_MONOTONIC, end);
+    if (start) {
+        start->tv_sec = start_send / NS_PER_S;
+        start->tv_nsec = start_send % NS_PER_S;
+    }
     if (next_seq)
         *next_seq = i;
     if (sent_pktsize)
@@ -580,13 +576,15 @@ static int run_client_ping_sequence(struct nanoping_instance *ins,
                                     struct sockaddr_in *remaddr,
                                     int delay, enum timer_type ttype,
                                     bool skip_fin_handshake, int dummy_pkt,
-                                    ssize_t *packet_size)
+                                    ssize_t *packet_size,
+                                    struct timespec *start,
+                                    struct timespec *end)
 {
     uint64_t next_seq;
     int res;
 
     res = client_sendloop(remaddr, ins, delay, ttype, dummy_pkt, &next_seq,
-                          packet_size);
+                          packet_size, start, end);
     if (res)
         return res;
 
@@ -823,9 +821,11 @@ static int server_handle_ping(struct nanoping_instance *ins,
 
 static int server_echoloop(struct nanoping_instance *ins,
                            const struct sockaddr_in *remaddr, int dummy_pkt,
-                           ssize_t *sent_pktsize)
+                           ssize_t *sent_pktsize, struct timespec *start,
+                           struct timespec *end)
 {
     struct nanoping_receive_result receive_result;
+    uint64_t first_rcv = 0;
     ssize_t pktsize = 0;
     int res;
 
@@ -836,18 +836,27 @@ static int server_echoloop(struct nanoping_instance *ins,
         if (res < 0)
             return res;
 
-        if (memcmp(&receive_result.remaddr, remaddr, sizeof(*remaddr)) == 0)
+        if (memcmp(&receive_result.remaddr, remaddr, sizeof(*remaddr)) == 0) {
             res = server_handle_ping(ins, &receive_result, dummy_pkt,
-                                 pktsize == 0 ? &pktsize : NULL);
-        else
+                                     pktsize == 0 ? &pktsize : NULL);
+
+            if (first_rcv == 0 && receive_result.type == msg_ping)
+                first_rcv = clock_gettime_ns(CLOCK_MONOTONIC);
+        } else {
             res = server_handle_foreign_packet(ins, &receive_result);
+        }
         if (res < 0)
             return res;
     }
 
+    if (end)
+        clock_gettime(CLOCK_MONOTONIC, end);
+    if (start) {
+        start->tv_sec = first_rcv / NS_PER_S;
+        start->tv_nsec = first_rcv % NS_PER_S;
+    }
     if (sent_pktsize)
         *sent_pktsize = pktsize;
-
     return 0;
 }
 
@@ -887,11 +896,6 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
         return EXIT_FAILURE;
     }
 
-    // TODO - move alarm later to not include time of handshake
-    if (client_opts->count > 0) {
-        alarm(client_opts->count);
-    }
-
     printf("nanoping %s:%s...\n", host, port);
 
     err = client_handshake((struct sockaddr_in *)reminfo->ai_addr, ins,
@@ -899,25 +903,23 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
     if (err)
         return EXIT_FAILURE;
 
-    if (clock_gettime(CLOCK_MONOTONIC, &started)) {
-        perror("clock_gettime(started)");
-        return EXIT_FAILURE;
-    }
-
     if (client_opts->direction == test_reverse) {
         err = close_threads(threads, ARRAY_SIZE(threads));
         err = err ?: setup_server_threads(ins, &txs_thread);
         err = err ?: server_echoloop(ins, (struct sockaddr_in *)reminfo->ai_addr,
-                                     dummy_pkt, &pktsize);
+                                     dummy_pkt, &pktsize, &started, &finished);
     } else {
         // In duplex mode - give server some time to transition to client mode
         if (client_opts->direction == test_duplex)
             sleep(1);
 
+        if (client_opts->count > 0)
+            alarm(client_opts->count);
+
         err = run_client_ping_sequence(ins, (struct sockaddr_in *)reminfo->ai_addr,
                                        client_opts->delay, client_opts->ttype,
                                        client_opts->direction == test_duplex,
-                                       dummy_pkt, &pktsize);
+                                       dummy_pkt, &pktsize, &started, &finished);
     }
     if (err) {
         fprintf(stderr, "Failed %s pings: %s\n",
@@ -926,12 +928,9 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
         return EXIT_FAILURE;
     }
 
-    if (clock_gettime(CLOCK_MONOTONIC, &finished)) {
-        perror("clock_gettime");
-        return EXIT_FAILURE;
-    }
     timevalsub(&finished, &started, &duration);
-    dump_statistics(ins, &duration, true, pktsize);
+    dump_statistics(ins, &duration, pktsize,
+                    client_opts->direction == test_forward);
 
     close_threads(threads, ARRAY_SIZE(threads));
 
@@ -965,13 +964,9 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt)
     if (err)
         return EXIT_FAILURE;
 
-    if (clock_gettime(CLOCK_MONOTONIC, &started)) {
-        perror("clock_gettime");
-        return EXIT_FAILURE;
-    }
-
     if (client_opts.direction == test_forward) {
-        err = server_echoloop(ins, &remaddr, dummy_pkt, &pktsize);
+        err = server_echoloop(ins, &remaddr, dummy_pkt, &pktsize, &started,
+                              &finished);
     } else {
         // reverse or duplex - switch to client-mode
         err = close_threads(threads, ARRAY_SIZE(threads));
@@ -989,7 +984,8 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt)
         err = err ?: run_client_ping_sequence(ins, &remaddr, client_opts.delay,
                                               client_opts.ttype,
                                               client_opts.direction == test_duplex,
-                                              dummy_pkt, &pktsize);
+                                              dummy_pkt, &pktsize, &started,
+                                              &finished);
     }
     if (err) {
         fprintf(stderr, "Failed %s pings: %s\n",
@@ -999,12 +995,9 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt)
     }
 
     // Test finished - shutdown
-    if (clock_gettime(CLOCK_MONOTONIC, &finished)) {
-        perror("clock_gettime");
-        return EXIT_FAILURE;
-    }
     timevalsub(&finished, &started, &duration);
-    dump_statistics(ins, &duration, true, pktsize);
+    dump_statistics(ins, &duration, pktsize,
+                    client_opts.direction == test_reverse);
 
     close_threads(threads, ARRAY_SIZE(threads));
 
