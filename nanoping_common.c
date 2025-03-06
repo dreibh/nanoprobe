@@ -423,15 +423,28 @@ retry:
     return res;
 }
 
-static void log_pkt_tstamp(const struct nanoping_instance *ins, uint64_t seq,
-                   const struct timespec *tstamp,
-                   enum timestamp_index tstamp_idx)
+static int get_tstamp_idx(enum nanoping_msg_type msg_type, bool tx)
 {
-    if (!ins || !ins->log_stream || seq == 0)
+    if (msg_type == msg_ping)
+        return tx ? 0 : 1;
+    else if (msg_type == msg_pong)
+        return tx ? 2 : 3;
+
+    return -1;
+}
+
+static void log_pkt_tstamp(const struct nanoping_instance *ins, uint64_t seq,
+                           const struct timespec *tstamp,
+                           enum nanoping_msg_type msg_type, bool tx)
+{
+    if (!ins->log_stream || seq == 0)
         return;
 
-    fprintf(ins->log_stream, "%lu,t%d,%lu.%09lu\n", seq, tstamp_idx,
-	    tstamp->tv_sec, tstamp->tv_nsec);
+    if (msg_type != msg_ping && msg_type != msg_pong)
+        return;
+
+    fprintf(ins->log_stream, "%lu,t%d,%lu.%09lu\n", seq,
+            get_tstamp_idx(msg_type, tx), tstamp->tv_sec, tstamp->tv_nsec);
 }
 
 ssize_t nanoping_receive_one(struct nanoping_instance *ins,
@@ -448,13 +461,10 @@ ssize_t nanoping_receive_one(struct nanoping_instance *ins,
 
     siz = receive_pkt_msg(ins, &msg, &stamp, &result->remaddr, payload_buf,
                           payload_len);
-
     if (siz < 0)
         return siz;
 
-    if (msg.type == msg_ping || msg.type == msg_pong)
-        log_pkt_tstamp(ins, msg.seq, &stamp, msg.type == msg_ping ?
-                       TSTAMP_IDX_RECVPING : TSTAMP_IDX_RECVPONG);
+    log_pkt_tstamp(ins, msg.seq, &stamp, msg.type, false);
 
     result->seq = msg.seq;
     result->type = msg.type;
@@ -552,10 +562,7 @@ int nanoping_txs_one(struct nanoping_instance *ins)
         }
         assert(siz == sizeof(etxs));
         ins->txs_collected++;
-        if (etxs.type == msg_ping || etxs.type == msg_pong)
-            log_pkt_tstamp(ins, etxs.seq, &etxs.stamp,
-                           etxs.type == msg_ping ? TSTAMP_IDX_SENDPING :
-                                                   TSTAMP_IDX_SENDPONG);
+        log_pkt_tstamp(ins, etxs.seq, &etxs.stamp, etxs.type, true);
         return 0;
     }
     FD_ZERO(&exceptfds);
@@ -599,10 +606,7 @@ int nanoping_txs_one(struct nanoping_instance *ins)
 
     if (stamp_found) {
         ins->txs_collected++;
-        if (msg->type == msg_ping || msg->type == msg_pong)
-            log_pkt_tstamp(ins, msg->seq, &stamp,
-                           msg->type == msg_ping ? TSTAMP_IDX_SENDPING :
-                                                   TSTAMP_IDX_SENDPONG);
+        log_pkt_tstamp(ins, msg->seq, &stamp, msg->type, true);
     }
 
     return 0;

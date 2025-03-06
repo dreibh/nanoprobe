@@ -11,13 +11,6 @@
 
 #define MAX_PAD_BYTES 2048
 
-enum timestamp_index {
-    TSTAMP_IDX_SENDPING = 0,
-    TSTAMP_IDX_RECVPING = 1,
-    TSTAMP_IDX_SENDPONG = 2,
-    TSTAMP_IDX_RECVPONG = 3,
-};
-
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof(arr[0]))
 
 #define timevaladd(tvp, uvp, vvp) \
