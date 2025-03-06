@@ -728,6 +728,8 @@ static int server_handshake(struct nanoping_instance *ins,
            timertype_to_str(client_opts->ttype), client_opts->ttype,
            testdirection_to_str(client_opts->direction), client_opts->direction);
 
+    if (client_opts->direction == test_duplex)
+        ins->log_pktdir = true;
     atomic_store(&state, client_opts->direction == test_duplex ? msg_ping_wait :
                          client_opts->direction == test_reverse ? msg_ping :
                                                                   msg_pong);
@@ -1144,7 +1146,8 @@ int main(int argc, char **argv)
      }
 
     if ((ins = nanoping_init(interface, port, mode == mode_server ? true: false,
-                             emulation, timeout, pad_bytes, busy_poll, log)) == NULL) {
+                             emulation, timeout, pad_bytes, busy_poll, log,
+                             client_opts.direction == test_duplex)) == NULL) {
         return EXIT_FAILURE;
     }
 

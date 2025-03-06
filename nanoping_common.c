@@ -299,7 +299,7 @@ static ssize_t receive_pkt_msg(struct nanoping_instance *ins,
 
 struct nanoping_instance *nanoping_init(char *interface, char *port,
     bool server, bool emulation, int timeout, int pad_bytes, int busy_poll,
-    const char *log_path)
+    const char *log_path, bool log_pktdir)
 {
     struct nanoping_instance *ins =
         (struct nanoping_instance *)calloc(1, sizeof(*ins));
@@ -398,10 +398,12 @@ struct nanoping_instance *nanoping_init(char *interface, char *port,
             perror("fopen(log_path)");
             return NULL;
         }
+        ins->log_pktdir = log_pktdir;
 
         fprintf(ins->log_stream, "seq,timestamp-idx,timestamp\n");
     } else {
         ins->log_stream = NULL;
+        ins->log_pktdir = false;
     }
 
     return ins;
@@ -433,18 +435,31 @@ static int get_tstamp_idx(enum nanoping_msg_type msg_type, bool tx)
     return -1;
 }
 
+static const char *get_pktdir_str(bool server, bool tx)
+{
+    if (server)
+        return tx ? "sc" : "cs";
+    else
+        return tx ? "cs" : "sc";
+}
+
 static void log_pkt_tstamp(const struct nanoping_instance *ins, uint64_t seq,
                            const struct timespec *tstamp,
                            enum nanoping_msg_type msg_type, bool tx)
 {
+    const char *pktdir;
+
     if (!ins->log_stream || seq == 0)
         return;
 
     if (msg_type != msg_ping && msg_type != msg_pong)
         return;
 
-    fprintf(ins->log_stream, "%lu,t%d,%lu.%09lu\n", seq,
-            get_tstamp_idx(msg_type, tx), tstamp->tv_sec, tstamp->tv_nsec);
+    pktdir = ins->log_pktdir ? get_pktdir_str(ins->server, tx) : "";
+
+    fprintf(ins->log_stream, "%lu,t%d%s,%lu.%09lu\n", seq,
+            get_tstamp_idx(msg_type, tx), pktdir,
+            tstamp->tv_sec, tstamp->tv_nsec);
 }
 
 ssize_t nanoping_receive_one(struct nanoping_instance *ins,

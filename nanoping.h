@@ -53,6 +53,7 @@ struct nanoping_instance {
     unsigned long rxs_collected;
     unsigned long txs_collected;
     uint64_t sent_seq;
+    bool log_pktdir;
 };
 
 enum nanoping_msg_type {
@@ -87,7 +88,7 @@ struct nanoping_receive_result {
 
 struct nanoping_instance *nanoping_init(char *interface, char *port,
     bool server, bool emulation, int timeout, int pad_bytes, int busy_poll,
-    const char *log_path);
+    const char *log_path, bool log_pktdir);
 int nanoping_wait_for_receive(struct nanoping_instance *ins);
 ssize_t nanoping_receive_one(struct nanoping_instance *ins,
 			     struct nanoping_receive_result *result,
