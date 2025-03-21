@@ -5,13 +5,25 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <netinet/in.h>
+#include <linux/udp.h>
+#include <linux/ip.h>
+#include <linux/if_ether.h>
 
 #define NS_PER_S 1000000000
 #define NS_PER_US 1000
 
 #define MAX_PAD_BYTES 2048
 
+#define TOT_NETHDR_SIZE (sizeof(struct udphdr) + sizeof(struct iphdr))
+#define TOT_LINKHDR_SIZE (TOT_NETHDR_SIZE + sizeof(struct ethhdr))
+#define TOT_APPNETHDR_SIZE (sizeof(struct nanoping_msg) +  TOT_NETHDR_SIZE)
+
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof(arr[0]))
+
+#define min(a,b)                                \
+    ({ typeof (a) _a = (a);                     \
+        typeof (b) _b = (b);                    \
+        _a < _b ? _a : _b; })
 
 #define timevaladd(tvp, uvp, vvp) \
     do { \
@@ -46,7 +58,6 @@ struct nanoping_instance {
     bool server;
     bool emulation;
     int emul_fds[2];
-    int pad_bytes;
     FILE *log_stream;
     unsigned long pkt_received;
     unsigned long pkt_transmitted;
@@ -86,8 +97,18 @@ struct nanoping_receive_result {
     struct sockaddr_in remaddr;
 };
 
+// The actual header sent in the packet
+struct nanoping_msg {
+    uint64_t seq;
+    uint8_t type;
+    uint8_t reserved[7];
+};
+
+_Static_assert(sizeof(struct nanoping_msg) == 16,
+               "Unexpected size of struct nanoping_msg - check for padding");
+
 struct nanoping_instance *nanoping_init(char *interface, char *port,
-    bool server, bool emulation, int timeout, int pad_bytes, int busy_poll,
+    bool server, bool emulation, int timeout, int busy_poll,
     const char *log_path, bool log_pktdir);
 int nanoping_wait_for_receive(struct nanoping_instance *ins);
 ssize_t nanoping_receive_one(struct nanoping_instance *ins,

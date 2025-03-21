@@ -19,22 +19,7 @@
 #include <linux/net_tstamp.h>
 #include <linux/sockios.h>
 #include <linux/errqueue.h>
-#include <linux/udp.h>
-#include <linux/ip.h>
-#include <linux/if_ether.h>
 #include "nanoping.h"
-
-#define TOT_LINKHDR_SIZE (sizeof(struct udphdr) + sizeof(struct iphdr) + \
-                          sizeof(struct ethhdr))
-
-struct nanoping_msg {
-    uint64_t seq;
-    uint8_t type;
-    uint8_t reserved[7];
-};
-
-_Static_assert(sizeof(struct nanoping_msg) == 16,
-               "Unexpected size of struct nanoping_msg - check for padding");
 
 struct nanoping_emul_txs {
     uint64_t seq;
@@ -175,7 +160,7 @@ static inline ssize_t send_pkt_msg(struct nanoping_instance *ins,
         iov[1].iov_len = payload_len;
     } else {
         iov[1].iov_base = buf;
-        iov[1].iov_len = ins->pad_bytes;
+        iov[1].iov_len = min(payload_len, sizeof(buf));
     }
 
     return send_pkt_common(ins, remaddr, iov, ARRAY_SIZE(iov), seq, type);
@@ -304,7 +289,7 @@ static ssize_t receive_pkt_msg(struct nanoping_instance *ins,
 }
 
 struct nanoping_instance *nanoping_init(char *interface, char *port,
-    bool server, bool emulation, int timeout, int pad_bytes, int busy_poll,
+    bool server, bool emulation, int timeout, int busy_poll,
     const char *log_path, bool log_pktdir)
 {
     struct nanoping_instance *ins =
@@ -388,7 +373,6 @@ struct nanoping_instance *nanoping_init(char *interface, char *port,
         if (enable_hw_timestamp(ins->fd, interface) < 0)
             return NULL;
     }
-    ins->pad_bytes = pad_bytes;
 
     if (busy_poll) {
         if ((res = setsockopt(ins->fd, SOL_SOCKET, SO_BUSY_POLL, &busy_poll,

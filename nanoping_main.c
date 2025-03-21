@@ -17,9 +17,8 @@
 #include "nanoping.h"
 
 // Some limits for acceptable values for server in reverse mode
-#define REVERSE_DEFAULT_COUNT 10
-#define REVERSE_MAX_COUNT 3600 // 1h
-#define REVERSE_MAX_DELAY 1000000 // 1sec
+#define CLIENT_MAX_COUNT 3600 // 1h
+#define CLIENT_MAX_DELAY 100000000 // 100sec
 
 enum timer_type {
     timer_sleep = 0,
@@ -44,26 +43,29 @@ enum test_direction {
 struct nanoping_client_opts {
     uint32_t count;
     uint32_t delay;
+    uint32_t ping_pad;
+    uint32_t pong_pad;
     enum timer_type ttype;
     enum test_direction direction;
 };
 
 static struct option longopts[] = {
-    {"interface",  required_argument, NULL, 'i'},
-    {"count",      required_argument, NULL, 'n'},
-    {"delay",      required_argument, NULL, 'd'},
-    {"port",       required_argument, NULL, 'p'},
-    {"log",        required_argument, NULL, 'l'},
-    {"emulation",  no_argument,       NULL, 'e'},
-    {"timeout",    required_argument, NULL, 't'},
-    {"busypoll",   required_argument, NULL, 'b'},
-    {"dummy-pkt",  required_argument, NULL, 'x'},
-    {"pad-bytes",  required_argument, NULL, 'B'},
-    {"timer",      required_argument, NULL, 'T'},
-    {"reverse",    no_argument,       NULL, 'R'},
-    {"duplex",     no_argument,       NULL, 'D'},
-    {"help",       no_argument,       NULL, 'h'},
-    {0,            0,                 0,     0 }
+    {"interface",      required_argument, NULL, 'i'},
+    {"count",          required_argument, NULL, 'n'},
+    {"delay",          required_argument, NULL, 'd'},
+    {"port",           required_argument, NULL, 'p'},
+    {"log",            required_argument, NULL, 'l'},
+    {"emulation",      no_argument,       NULL, 'e'},
+    {"timeout",        required_argument, NULL, 't'},
+    {"busypoll",       required_argument, NULL, 'b'},
+    {"dummy-pkt",      required_argument, NULL, 'x'},
+    {"ping-size",      required_argument, NULL, 's'},
+    {"pong-size",      required_argument, NULL, 'o'},
+    {"timer",          required_argument, NULL, 'T'},
+    {"reverse",        no_argument,       NULL, 'R'},
+    {"duplex",         no_argument,       NULL, 'D'},
+    {"help",           no_argument,       NULL, 'h'},
+    {0,                0,                 0,     0 }
 };
 
 static atomic_bool signal_initialized = ATOMIC_VAR_INIT(false);
@@ -76,7 +78,7 @@ static pthread_cond_t ping_wait_cond;
 static void usage(void)
 {
     fprintf(stderr, "usage:\n");
-    fprintf(stderr, "  client: nanoping --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [log] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --reverse/--duplex [host]\n");
+    fprintf(stderr, "  client: nanoping --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [log] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --ping-size --pong-size --reverse/--duplex [host]\n");
     fprintf(stderr, "  server: nanoping --server --interface [nic] --port [port] --log [log] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt]\n");
 }
 
@@ -148,7 +150,7 @@ static void dump_statistics(struct nanoping_instance *ins,
 
     printf("--- nanoping statistics ---\n");
     printf("packet size %zd bytes, time %ld.%09ld s\n",
-           size, duration->tv_sec, duration->tv_nsec);
+           size + TOT_NETHDR_SIZE, duration->tv_sec, duration->tv_nsec);
     printf("%lu packets transmitted (%.1f pps), %lu received (%.1f pps)",
            ins->pkt_transmitted, ins->pkt_transmitted / duration_s,
            ins->pkt_received, ins->pkt_received / duration_s);
@@ -529,7 +531,7 @@ static int client_sendloop(const struct sockaddr_in *remaddr,
 
     for (i = 1; !atomic_load(&signal_handled); i++) {
         send_request.seq = i;
-        siz = nanoping_send_one(ins, &send_request, NULL, 0);
+        siz = nanoping_send_one(ins, &send_request, NULL, opts->ping_pad);
         if (siz < 0)
             return siz;
 
@@ -613,72 +615,113 @@ static enum timer_type select_default_timer(int delay_us)
     return delay_us <= 1000 ? timer_busy : timer_sleep;
 }
 
+static int64_t sanitize_clientopt(const char *name, int64_t val,
+                                  int64_t min_val, int64_t max_val, int *err,
+                                  bool fix, const int64_t *fixval,
+                                  const char *fixval_name)
+{
+    int64_t replacement;
+
+    *err = 0;
+
+    if (val < min_val || val > max_val) {
+        *err = -ERANGE;
+        fprintf(stderr, "Warning: Client has set %s %ld, must be in [%ld, %ld]\n",
+                name, val, min_val, max_val);
+
+        if (fix) {
+            replacement = fixval ? *fixval : val < min_val ? min_val : max_val;
+
+            if (fixval && fixval_name)
+                fprintf(stderr, "Using %s %s (%ld) instead\n", name,
+                        fixval_name, replacement);
+            else
+                fprintf(stderr, "Using %s %ld instead\n", name, replacement);
+
+            return replacement;
+        }
+    }
+
+    return val;
+}
+
 static int sanitize_clientopts(struct nanoping_client_opts *opts, bool fix)
 {
+    bool checkcount, checkdelay, checkpingpad, checkpongpad, checkttype;
+    int64_t replacement;
     int err = 0;
 
-    // For forward test any value is valid (only affects client)
-    if (opts->direction == test_forward)
-        return 0;
+    replacement = test_forward;
+    opts->direction = sanitize_clientopt("test direction", opts->direction, 0,
+                                         test_n_directions - 1, &err, fix,
+                                         &replacement,
+                                         testdirection_to_str(replacement));
+    if (!fix && err)
+        return err;
 
-    if (opts->count == 0) {
-        err = -EINVAL;
-        fprintf(stderr, "Warning: Client has not set count (must be non-zero)\n");
-        if (fix) {
-            fprintf(stderr, "Using default %d s\n", REVERSE_DEFAULT_COUNT);
-            opts->count = REVERSE_DEFAULT_COUNT;
-        } else {
+    // Determine which fields need to be checked
+    checkcount = opts->direction != test_forward;
+    checkdelay = opts->direction != test_forward;
+    checkpingpad = opts->direction != test_forward;
+    checkpongpad = opts->direction == test_forward;
+    checkttype = opts->direction != test_forward;
+
+    if (checkcount) {
+        opts->count = sanitize_clientopt("count", opts->count, 1,
+                                         CLIENT_MAX_COUNT, &err, fix, NULL, NULL);
+        if (!fix && err)
             return err;
-        }
-    } else if (opts->count > REVERSE_MAX_COUNT) {
-        err = -ERANGE;
-        fprintf(stderr, "Warning: Client has set count %u s, must be <= %u s\n",
-                opts->count, REVERSE_MAX_COUNT);
-        if (fix) {
-            fprintf(stderr, "Limiting to %u s\n", REVERSE_MAX_COUNT);
-            opts->count = REVERSE_MAX_COUNT;
-        } else {
-            return err;
-        }
     }
 
-    if (opts->delay > REVERSE_MAX_DELAY) {
-        err = -ERANGE;
-        fprintf(stderr, "Warning: Client has set delay to %u us, must be <= %u us\n",
-                opts->delay, REVERSE_MAX_DELAY);
-        if (fix) {
-            fprintf(stderr, "Limiting to %u us\n", REVERSE_MAX_DELAY);
-            opts->delay = REVERSE_MAX_DELAY;
-        } else {
+    if (checkdelay) {
+        opts->delay = sanitize_clientopt("delay", opts->delay, 0,
+                                         CLIENT_MAX_DELAY, &err, fix, NULL, NULL);
+        if (!fix && err)
             return err;
-        }
     }
 
-    if (opts->ttype < 0 || opts->ttype >= timer_invalid) {
-        err = -EINVAL;
-        fprintf(stderr, "Warning: Client set invalid timer type (%d)\n",
-                opts->ttype);
-        if (fix) {
-            opts->ttype = select_default_timer(opts->delay);
-            fprintf(stderr, "Using timer %s (%d) instead\n",
-                    timertype_to_str(opts->ttype), opts->ttype);
-        } else {
+    if (checkpingpad) {
+        opts->ping_pad = sanitize_clientopt("ping padding", opts->ping_pad, 0,
+                                            MAX_PAD_BYTES, &err, fix, NULL, NULL);
+        if (!fix && err)
             return err;
-        }
     }
 
-    if (opts->direction < 0 || opts->direction >= test_n_directions) {
-        err = -ERANGE;
-        fprintf(stderr, "Warning: Client set invalid test direction (%d)\n",
-                opts->direction);
-        if (fix) {
-            opts->direction = test_forward;
-            fprintf(stderr, "Using direction %s (%d) instead\n",
-                    testdirection_to_str(opts->direction), opts->direction);
-        }
+    if (checkpongpad) {
+        opts->pong_pad = sanitize_clientopt("pong padding", opts->pong_pad, 0,
+                                            MAX_PAD_BYTES, &err, fix, NULL, NULL);
+        if (!fix && err)
+            return err;
+
     }
 
-    return err;
+    if (checkttype) {
+        replacement = select_default_timer(opts->delay);
+        opts->ttype = sanitize_clientopt("timer type", opts->ttype, 0,
+                                         timer_n_types - 1, &err, fix, &replacement,
+                                         timertype_to_str(replacement));
+        if (!fix && err)
+            return err;
+    }
+
+    return 0;
+}
+
+static void server_log_client_connection(const struct sockaddr_in *remaddr)
+{
+    char buf[INET6_ADDRSTRLEN] = "";
+
+    inet_ntop(remaddr->sin_family, &remaddr->sin_addr, buf, sizeof(buf));
+    printf("Connected to client %s:%u\n", buf, ntohs(remaddr->sin_port));
+}
+
+static void server_log_clientopts(const struct nanoping_client_opts *client_opts)
+{
+    printf("Client using settings: count: %u s, delay: %u us, ping-padding %u bytes, pong-padding %u bytes, timer: %s (%d), direction: %s (%d)\n",
+           client_opts->count, client_opts->delay, client_opts->ping_pad,
+           client_opts->pong_pad, timertype_to_str(client_opts->ttype),
+           client_opts->ttype, testdirection_to_str(client_opts->direction),
+           client_opts->direction);
 }
 
 static int server_handshake(struct nanoping_instance *ins,
@@ -688,7 +731,6 @@ static int server_handshake(struct nanoping_instance *ins,
     struct nanoping_receive_result receive_result = {0};
     struct nanoping_send_request send_request = {0};
     size_t opt_len = sizeof(*client_opts);
-    char buf[INET6_ADDRSTRLEN] = "";
     int res;
 
     // Wait for SYN
@@ -715,16 +757,10 @@ static int server_handshake(struct nanoping_instance *ins,
     if (res < 0)
         return res;
 
-    inet_ntop(receive_result.remaddr.sin_family,
-              &receive_result.remaddr.sin_addr, buf, sizeof(buf));
-    printf("Connected to client %s:%u\n", buf,
-           ntohs(receive_result.remaddr.sin_port));
+    server_log_client_connection(&receive_result.remaddr);
 
     sanitize_clientopts(client_opts, true);
-    printf("Client using settings: count: %u s, delay: %u us, timer: %s (%d), direction: %s (%d)\n",
-           client_opts->count, client_opts->delay,
-           timertype_to_str(client_opts->ttype), client_opts->ttype,
-           testdirection_to_str(client_opts->direction), client_opts->direction);
+    server_log_clientopts(client_opts);
 
     if (client_opts->direction == test_duplex)
         ins->log_pktdir = true;
@@ -765,7 +801,7 @@ static int server_handle_foreign_packet(struct nanoping_instance *ins,
 
 static int server_handle_ping(struct nanoping_instance *ins,
                               const struct nanoping_receive_result *receive_result,
-                              int dummy_pkt, ssize_t *pktsize)
+                              int dummy_pkt, uint16_t pkt_pad, ssize_t *pktsize)
 {
     struct nanoping_send_dummies_request dummies_request;
     struct nanoping_send_request send_request = {0};
@@ -794,7 +830,7 @@ static int server_handle_ping(struct nanoping_instance *ins,
                 break;
             }
             prepare_server_reply(&send_request, receive_result, msg_pong);
-            res = nanoping_send_one(ins, &send_request, NULL, 0);
+            res = nanoping_send_one(ins, &send_request, NULL, pkt_pad);
             if (res < 0)
                 return res;
             if (pktsize)
@@ -821,8 +857,8 @@ static int server_handle_ping(struct nanoping_instance *ins,
 
 static int server_echoloop(struct nanoping_instance *ins,
                            const struct sockaddr_in *remaddr, int dummy_pkt,
-                           ssize_t *sent_pktsize, struct timespec *start,
-                           struct timespec *end)
+                           uint16_t pkt_pad, ssize_t *sent_pktsize,
+                           struct timespec *start, struct timespec *end)
 {
     struct nanoping_receive_result receive_result;
     uint64_t first_rcv = 0;
@@ -837,7 +873,7 @@ static int server_echoloop(struct nanoping_instance *ins,
             return res;
 
         if (memcmp(&receive_result.remaddr, remaddr, sizeof(*remaddr)) == 0) {
-            res = server_handle_ping(ins, &receive_result, dummy_pkt,
+            res = server_handle_ping(ins, &receive_result, dummy_pkt, pkt_pad,
                                      pktsize == 0 ? &pktsize : NULL);
 
             if (first_rcv == 0 && receive_result.type == msg_ping)
@@ -907,7 +943,8 @@ static int run_client(struct nanoping_instance *ins, char *host, char *port,
         err = close_threads(threads, ARRAY_SIZE(threads));
         err = err ?: setup_server_threads(ins, &txs_thread);
         err = err ?: server_echoloop(ins, (struct sockaddr_in *)reminfo->ai_addr,
-                                     dummy_pkt, &pktsize, &started, &finished);
+                                     dummy_pkt, client_opts->pong_pad, &pktsize,
+                                     &started, &finished);
     } else {
         // In duplex mode - give server some time to transition to client mode
         if (client_opts->direction == test_duplex)
@@ -964,8 +1001,8 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt)
         return EXIT_FAILURE;
 
     if (client_opts.direction == test_forward) {
-        err = server_echoloop(ins, &remaddr, dummy_pkt, &pktsize, &started,
-                              &finished);
+        err = server_echoloop(ins, &remaddr, dummy_pkt, client_opts.pong_pad,
+                              &pktsize, &started, &finished);
     } else {
         // reverse or duplex - switch to client-mode
         err = close_threads(threads, ARRAY_SIZE(threads));
@@ -1001,12 +1038,28 @@ static int run_server(struct nanoping_instance *ins, char *port, int dummy_pkt)
     return EXIT_SUCCESS;
 }
 
+static bool valid_packetsize(int pkt_size, bool verbose)
+{
+    if (pkt_size < TOT_APPNETHDR_SIZE ||
+        pkt_size > TOT_APPNETHDR_SIZE + MAX_PAD_BYTES) {
+        if (verbose)
+            fprintf(stderr, "packet size %d invalid, must be in range [%lu, %lu]\n",
+                    pkt_size, TOT_APPNETHDR_SIZE,
+                    TOT_APPNETHDR_SIZE + MAX_PAD_BYTES);
+        return false;
+    }
+
+    return true;
+}
+
 int main(int argc, char **argv)
 {
     struct nanoping_instance *ins = NULL;
     struct nanoping_client_opts client_opts = {
         .count = 0,
         .delay = 100,
+        .ping_pad = 0,
+        .pong_pad = 0,
         .ttype = timer_invalid,
         .direction = test_forward,
     };
@@ -1019,7 +1072,6 @@ int main(int argc, char **argv)
     int timeout = 5000000;
     int busy_poll = 0;
     int dummy_pkt = 0;
-    int pad_bytes = 0;
     int c, res, nargc = argc;
     bool reverse = false, duplex = false;
 
@@ -1038,7 +1090,7 @@ int main(int argc, char **argv)
 	usage();
 	return EXIT_FAILURE;
     }
-    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:et:B:b:T:RDh", longopts, NULL)) != -1) {
+    while ((c = getopt_long(nargc, argv + 1, "i:n:d:p:l:et:s:o:b:T:RDh", longopts, NULL)) != -1) {
         switch (c) {
             case 'i':
                 interface = optarg;
@@ -1061,8 +1113,19 @@ int main(int argc, char **argv)
             case 't':
                 timeout = atoi(optarg);
                 break;
-            case 'B':
-                pad_bytes = atoi(optarg);
+            case 's':
+                res = atoi(optarg);
+                if (valid_packetsize(res, true))
+                    client_opts.ping_pad = res - TOT_APPNETHDR_SIZE;
+                else
+                    return EXIT_FAILURE;
+                break;
+            case 'o':
+                res = atoi(optarg);
+                if (valid_packetsize(res, true))
+                    client_opts.pong_pad = res - TOT_APPNETHDR_SIZE;
+                else
+                    return EXIT_FAILURE;
                 break;
             case 'b':
                 busy_poll = atoi(optarg);
@@ -1092,12 +1155,6 @@ int main(int argc, char **argv)
                 usage();
                 return EXIT_FAILURE;
         }
-    }
-
-    if (pad_bytes < 0 || pad_bytes > MAX_PAD_BYTES) {
-        fprintf(stderr, "pad-bytes must be in range [%d, %d]\n",
-                0, MAX_PAD_BYTES);
-        return EXIT_FAILURE;
     }
 
     // If timer-type not set, automatically set it based on configured delay
@@ -1136,7 +1193,7 @@ int main(int argc, char **argv)
      }
 
     if ((ins = nanoping_init(interface, port, mode == mode_server ? true: false,
-                             emulation, timeout, pad_bytes, busy_poll, log,
+                             emulation, timeout, busy_poll, log,
                              client_opts.direction == test_duplex)) == NULL) {
         return EXIT_FAILURE;
     }
