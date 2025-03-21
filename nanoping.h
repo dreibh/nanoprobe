@@ -11,13 +11,6 @@
 
 #define MAX_PAD_BYTES 2048
 
-enum timestamp_index {
-    TSTAMP_IDX_SENDPING = 0,
-    TSTAMP_IDX_RECVPING = 1,
-    TSTAMP_IDX_SENDPONG = 2,
-    TSTAMP_IDX_RECVPONG = 3,
-};
-
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof(arr[0]))
 
 #define timevaladd(tvp, uvp, vvp) \
@@ -60,6 +53,7 @@ struct nanoping_instance {
     unsigned long rxs_collected;
     unsigned long txs_collected;
     uint64_t sent_seq;
+    bool log_pktdir;
 };
 
 enum nanoping_msg_type {
@@ -67,6 +61,7 @@ enum nanoping_msg_type {
     msg_syn,
     msg_syn_ack,
     msg_syn_rst,
+    msg_ping_wait,
     msg_ping,
     msg_pong,
     msg_fin,
@@ -93,7 +88,7 @@ struct nanoping_receive_result {
 
 struct nanoping_instance *nanoping_init(char *interface, char *port,
     bool server, bool emulation, int timeout, int pad_bytes, int busy_poll,
-    const char *log_path);
+    const char *log_path, bool log_pktdir);
 int nanoping_wait_for_receive(struct nanoping_instance *ins);
 ssize_t nanoping_receive_one(struct nanoping_instance *ins,
 			     struct nanoping_receive_result *result,
