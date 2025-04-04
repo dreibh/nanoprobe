@@ -24,6 +24,7 @@
 struct nanoping_emul_txs {
     uint64_t seq;
     struct timespec stamp;
+    uint16_t size;
     uint8_t type;
 };
 
@@ -130,6 +131,7 @@ static inline ssize_t send_pkt_common(struct nanoping_instance *ins,
 
         etxs.seq = seq;
         etxs.stamp = st;
+        etxs.size = siz;
         etxs.type = type;
         m2.msg_iov = &iov2;
         m2.msg_iovlen = 1;
@@ -267,6 +269,7 @@ static ssize_t receive_pkt_msg(struct nanoping_instance *ins,
 			       struct sockaddr_in *remaddr, void *payload_buf,
                                size_t *payload_len)
 {
+    static char buf[MAX_PAD_BYTES] = {0};
     struct iovec iov[2];
 
     iov[0].iov_base = msg;
@@ -275,10 +278,12 @@ static ssize_t receive_pkt_msg(struct nanoping_instance *ins,
     if (payload_buf)  {
         iov[1].iov_base = payload_buf;
         iov[1].iov_len = *payload_len;
+    } else {
+        iov[1].iov_base = buf;
+        iov[1].iov_len = sizeof(buf);
     }
 
-    ssize_t siz = receive_pkt_common(ins, iov, payload_buf ? 2 : 1, stamp,
-                                     remaddr);
+    ssize_t siz = receive_pkt_common(ins, iov, ARRAY_SIZE(iov), stamp, remaddr);
     if (siz < (ssize_t)sizeof(*msg))
         return siz < 0 ? siz : -ENOMSG;
 
@@ -390,7 +395,7 @@ struct nanoping_instance *nanoping_init(char *interface, char *port,
         }
         ins->log_pktdir = log_pktdir;
 
-        fprintf(ins->log_stream, "seq,timestamp-idx,timestamp\n");
+        fprintf(ins->log_stream, "seq,timestamp-idx,timestamp,size\n");
     } else {
         ins->log_stream = NULL;
         ins->log_pktdir = false;
@@ -435,7 +440,8 @@ static const char *get_pktdir_str(bool server, bool tx)
 
 static void log_pkt_tstamp(const struct nanoping_instance *ins, uint64_t seq,
                            const struct timespec *tstamp,
-                           enum nanoping_msg_type msg_type, bool tx)
+                           enum nanoping_msg_type msg_type, uint16_t size,
+			   bool tx)
 {
     const char *pktdir;
 
@@ -447,9 +453,9 @@ static void log_pkt_tstamp(const struct nanoping_instance *ins, uint64_t seq,
 
     pktdir = ins->log_pktdir ? get_pktdir_str(ins->server, tx) : "";
 
-    fprintf(ins->log_stream, "%lu,t%d%s,%lu.%09lu\n", seq,
-            get_tstamp_idx(msg_type, tx), pktdir,
-            tstamp->tv_sec, tstamp->tv_nsec);
+    fprintf(ins->log_stream, "%lu,t%d%s,%lu.%09lu,%lu\n", seq,
+            get_tstamp_idx(msg_type, tx), pktdir, tstamp->tv_sec,
+            tstamp->tv_nsec, size + TOT_NETHDR_SIZE);
 }
 
 ssize_t nanoping_receive_one(struct nanoping_instance *ins,
@@ -469,7 +475,7 @@ ssize_t nanoping_receive_one(struct nanoping_instance *ins,
     if (siz < 0)
         return siz;
 
-    log_pkt_tstamp(ins, msg.seq, &stamp, msg.type, false);
+    log_pkt_tstamp(ins, msg.seq, &stamp, msg.type, siz, false);
 
     result->seq = msg.seq;
     result->type = msg.type;
@@ -567,7 +573,7 @@ int nanoping_txs_one(struct nanoping_instance *ins)
         }
         assert(siz == sizeof(etxs));
         ins->txs_collected++;
-        log_pkt_tstamp(ins, etxs.seq, &etxs.stamp, etxs.type, true);
+        log_pkt_tstamp(ins, etxs.seq, &etxs.stamp, etxs.type, etxs.size, true);
         return 0;
     }
     FD_ZERO(&exceptfds);
@@ -611,7 +617,8 @@ int nanoping_txs_one(struct nanoping_instance *ins)
 
     if (stamp_found) {
         ins->txs_collected++;
-        log_pkt_tstamp(ins, msg->seq, &stamp, msg->type, true);
+        log_pkt_tstamp(ins, msg->seq, &stamp, msg->type, siz - TOT_LINKHDR_SIZE,
+                       true);
     }
 
     return 0;
