@@ -92,7 +92,7 @@ static void usage(void)
 {
     fprintf(stderr, "usage:\n");
     fprintf(stderr, "  client: nanoping --client --interface [nic] --count [sec] --delay [usec] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --timer [timer-type] --ping-size [bytes] --pong-size [bytes] --probe-schedule [csv] --pong-every [n] --reverse/--duplex [host]\n");
-    fprintf(stderr, "  server: nanoping --server --interface [nic] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt]\n");
+    fprintf(stderr, "  server: nanoping --server --interface [nic] --port [port] --log [logfile] --emulation --timeout [usec] --busypoll [usec] --dummy-pkt [cnt] --probe-schedule [csv]\n");
 }
 
 inline static double percent_ulong(unsigned long v1, unsigned long v2)
