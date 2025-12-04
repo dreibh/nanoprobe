@@ -1,0 +1,118 @@
+.\" Nanoprobe Manpage
+.\"
+.\" MIT License
+.\"
+.\" Copyright (C) 2025 by Thomas Dreibholz <dreibh@simula.no>
+.\"
+.\" Permission is hereby granted, free of charge, to any person obtaining a copy
+.\" of this software and associated documentation files (the "Software"), to deal
+.\" in the Software without restriction, including without limitation the rights
+.\" to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+.\" copies of the Software, and to permit persons to whom the Software is
+.\" furnished to do so, subject to the following conditions:
+.\"
+.\" The above copyright notice and this permission notice shall be included in all
+.\" copies or substantial portions of the Software.
+.\"
+.\" THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+.\" IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+.\" FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+.\" AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+.\" LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+.\" OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+.\" SOFTWARE.
+.\"
+.\" ###### Setup ############################################################
+.Dd December 2, 2025
+.Dt nanoprobe 1
+.Os nanoprobe
+.\" ###### Name #############################################################
+.Sh NAME
+.Nm nanoprobe
+.Nd Nanoprobe
+.\" ###### Synopsis #########################################################
+.Sh SYNOPSIS
+.Nm nanoprobe
+.Op Fl Fl client
+.Op Fl Fl interface Ar nic | Fl i Ar nic
+.Op Fl Fl count Ar sec | Fl n Ar sec
+.Op Fl Fl delay Ar usec | Fl d Ar usec
+.Op Fl Fl port Ar port | Fl p Ar port
+.Op Fl Fl log Ar logfile | Fl l Ar logfile
+.Op Fl Fl emulation | Fl e
+.Op Fl Fl timeout Ar usec | Fl t Ar usec
+.Op Fl Fl busypoll Ar usec | Fl b Ar usec
+.Op Fl Fl dummy-pkt Ar cnt | Fl x Ar cnt
+.Op Fl Fl timer Ar busy|sleep | Fl T Ar busy|sleep
+.Op Fl Fl ping-size Ar bytes | Fl s Ar bytes
+.Op Fl Fl pong-size Ar bytes | Fl o Ar bytes
+.Op Fl Fl probe-schedule Ar csv | Fl S Ar csv
+.Op Fl Fl pong-every Ar n | Fl y Ar n
+.Op Fl Fl reverse | Fl R
+.Op Fl Fl duplex | Fl D
+host
+.Nm nanoprobe
+.Op Fl Fl server
+.Op Fl Fl interface Ar nic | Fl i Ar nic
+.Op Fl Fl port Ar port | Fl p Ar port
+.Op Fl Fl log Ar logfile | Fl l Ar logfile
+.Op Fl Fl emulation | Fl e
+.Op Fl Fl timeout Ar usec | Fl t Ar usec
+.Op Fl Fl busypoll Ar usec | Fl b Ar usec
+.Op Fl Fl dummy-pkt Ar cnt | Fl x Ar cnt
+.Op Fl Fl probe-schedule Ar csv | Fl S Ar csv
+.\" ###### Description ######################################################
+.Sh DESCRIPTION
+.Nm nanoprobe
+is a high time accuracy ping-like program, based on nanoping (https://github.com/iij/nanoping), that relies on the hardware time stamping function of the Network Interface Card (NIC).
+The nanoprobe tool enables precise packet timestamping at NIC phy/mac layer, and thereby allows precise measurements of the actual network latency that is unaffected by any additional delay/jitter components form the local network stack or application.
+.br
+Timestamp resolution and precision is defined by the hardware oscillator on the Ethernet controller.
+For example, minimum timestamping resolution is 12.5ns on the Intel X550 Ethernet controller, because it has 80MHz oscillator for the timestamping function.
+.Pp
+.\" ###### Arguments ########################################################
+.Sh ARGUMENTS
+The following arguments may be provided:
+.Bl -tag -width indent
+.It Fl Fl busypoll Ar usec | Fl b Ar usec
+Set "SO_BUSY_POLL" socket option for ping/pong socket (see man socket(7) for details).
+.It Fl Fl client
+Run in client mode, the IPv4 address of the server has to be provided as the final argument.
+.It Fl Fl count Ar sec | Fl n Ar sec
+The duration of the nanoprobe measurement in seconds. Set to 0 to run forever (only supported in the "forward" test direction)
+.It Fl Fl delay Ar usec | Fl d Ar usec
+The target time in microseconds between sending ping packets.
+.It Fl Fl dummy-pkt Ar cnt | Fl x Ar cnt
+Send n additional packets during each ping-pong transaction. This option produces broader bandwidth for the measurements stream. Inherited from nanoping but not really tested with nanoprobe.
+.It Fl Fl duplex | Fl D
+Instead of the nanoprobe server ponging the pings from the client, make it independently (although starting on the reception of the first ping from the client) send its own pings to the client. This is mutually exclusive with the "reverse" option.
+.It Fl Fl emulation | Fl e
+Use software timestamps from the nanoprobe process instead of hardware timestamps supplied by the NIC.
+.It Fl Fl interface Ar nic | Fl i Ar nic
+Specify interface name to send/receive ping-pong packets.
+.It Fl Fl log Ar logfile | Fl l Ar logfile
+Log per-packet timestamps in a CSV-format to the provided file.
+.It Fl Fl ping-size Ar bytes | Fl s Ar bytes
+The size of the ping packets (including the IP-header, but not the Ethernet header). Defaults to the smallest possible size (currently 44 bytes).
+.It Fl Fl pong-every Ar n | Fl y Ar n
+Only pong (reply to) every n:th ping message. The value 0 will disable ponging altogether (NOTE: this may cause the application to timeout depending on the test duration and the supplied "timeout" value). Default is to pong every ping.
+.It Fl Fl pong-size Ar bytes | Fl o Ar bytes
+The size of the ping packets (including the IP-header, but not the Ethernet header). Defaults to the smallest possible size (currently 44 bytes).
+.It Fl Fl port Ar port | Fl p Ar port
+Specify the port to bind to (if server) or connect to (if client). Default port is 10666.
+.It Fl Fl probe-schedule Ar csv
+Provide a schedule for the ping packets in a CSV with the delay and ping-size for each packet. The CSV format is "<delay>,<ping-size>" (with delay and ping-size specified as for the corresponding options) with one line per packet, no header. The test will run until each packet in the schedule has been sent. This option overrides any supplied delay, ping-size and count options. In order for the server to be able to follow a schedule (in the reverse and duplex modes) the server must be started with this option, the client will not share the schedule with the server.
+.It Fl Fl reverse | Fl R
+Instead of the nanoprobe client pinging the server, request that the server pings the client. This can be useful if the client is behind NAT, so that the server and clients cannot simply swap places. This is mutually exclusive with the "duplex" option.
+.It Fl Fl server
+Run in server mode.
+.It Fl Fl timeout Ar usec | Fl t Ar usec
+Set the timeout value in microseconds for how long to wait for a ping or pong packet before failing. Sets the "SO_RCVTIMEO" socket option on the ping/pong socket. Default is 5 seconds.
+.It Fl Fl timer Ar busy|sleep | Fl T Ar busy|sleep
+Determines how to wait for the required time between packets to achieve the target delay. The sleep option tries to sleep until the next packet needs to be sent, but this tends to be quite inaccurate at sub-millisecond timescales. The "busy" alternative instead busy loops until the next packet needs to be sent, which achieves much greater accuracy (typically within one microsecond) but at the cost of burning CPU cycles. Defaults to busy if delay <= 1ms, otherwise sleep.
+.El
+.\" ###### Examples #########################################################
+.Sh EXAMPLES
+.Bl -tag -width indent
+.It nanoprobe ...
+.El
